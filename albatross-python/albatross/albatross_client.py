@@ -102,7 +102,7 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def inject_albatross(self, pid: int, flags: InjectFlag = InjectFlag.KEEP | InjectFlag.UNIX,
-                       temp_dir: str | None = None) -> InjectResult:
+      temp_dir: str | None = None) -> InjectResult:
     pass
 
   @rpc_api
@@ -119,13 +119,13 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def load_injector(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
-                    agent_register_func: str, flags: LoadDexFlag, injector_dex: str, injector_lib: str,
-                    injector_class: str, injector_arg_str: str, injector_arg_init: int) -> DexLoadResult:
+      agent_register_func: str, flags: LoadDexFlag, injector_dex: str, injector_lib: str,
+      injector_class: str, injector_arg_str: str, injector_arg_init: int) -> DexLoadResult:
     pass
 
   @rpc_api
   def load_dex(self, pid: int, dex_path: str, lib_path: str | None, register_class: str, class_name: str,
-               loader_symbol_name: str, flags: LoadDexFlag) -> DexLoadResult:
+      loader_symbol_name: str, flags: LoadDexFlag) -> DexLoadResult:
     pass
 
   @rpc_api
@@ -142,7 +142,7 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def set_system_server_agent(self, dex_path: str, server_name: str = 'system_server',
-                              load_flags: LoadDexFlag = LoadDexFlag.NONE) -> DexSetResult:
+      load_flags: LoadDexFlag = LoadDexFlag.NONE) -> DexSetResult:
     pass
 
   @broadcast_api
@@ -157,3 +157,11 @@ class AlbatrossClient(RpcClient):
   def launch_process(self, process_info: dict):
     if self.can_send:
       raise Exception("launch_process should register handler")
+
+  @rpc_api
+  def patch_selinux(self) -> bool:
+    pass
+
+  @rpc_api
+  def is_injected(self, pid: int) -> bool:
+    pass

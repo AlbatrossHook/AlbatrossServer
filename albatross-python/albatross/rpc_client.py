@@ -413,7 +413,7 @@ def create_receive_function(arg_list):
 
 
 def parse_bool(data, result):
-  return result >= 0
+  return result > 0
 
 
 def parse_byte(data, result):
