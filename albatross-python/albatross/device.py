@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import time
 
 from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, LoadDexFlag, RunTimeISA
@@ -74,19 +75,33 @@ def get_devices():
 def check_device_alive(device_name, try_time=3):
   for i in range(try_time):
     ret_code, bs = run_shell(f"{adb_path} -s {device_name} shell echo ping", timeout=2)
-    if b'ping\n' == bs:
+    if bs and bs.startswith(b'ping'):
       return True
     if i < try_time - 1:
       time.sleep(0.5)
   return False
 
 
-def file_md5(file_path):
-  ret, ret_bs = run_shell('md5sum ' + file_path)
-  if ret == 0:
-    return ret_bs.decode().split()[0]
-  return None
+if sys.platform.startswith('win'):
+  import hashlib
 
+
+  def file_md5(file_path):
+    md5 = hashlib.md5()
+    try:
+      with open(file_path, 'rb') as f:
+        while chunk := f.read(8192):
+          md5.update(chunk)
+      return md5.hexdigest()
+    except IOError as e:
+      return None
+else:
+
+  def file_md5(file_path):
+    ret, ret_bs = run_shell('md5sum ' + file_path)
+    if ret == 0:
+      return ret_bs.decode().split()[0]
+    return None
 
 pkg_pattern = re.compile(r"package:([\w.]+)(?:\s+|$)")
 
@@ -109,7 +124,7 @@ class AlbatrossDevice(object):
     self.app_launch_count = {}
 
   def shell(self, cmd, timeout=None) -> list | str:
-    cmd = self.shellcmd + "'" + cmd + "'"
+    cmd = self.shellcmd + '"' + cmd + '"'
     if timeout:
       ret = run_shell(cmd, timeout=timeout)
     else:
@@ -532,7 +547,7 @@ class AlbatrossDevice(object):
     if isinstance(remote_port, int):
       remote_port = 'tcp:' + str(remote_port)
     for s, lp, rp in self.forward_list():
-      if rp == remote_port and s == self:
+      if rp == remote_port and s == self.device_id:
         local_port = int(lp[4:])
         if not_check or check_socket_port("127.0.0.1", local_port):
           break
