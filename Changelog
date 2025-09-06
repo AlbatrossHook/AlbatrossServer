@@ -1,2 +1,6 @@
+version 1.0.1:
+ - Compatible with window system.
+ - Do not disable Selinux default.
+
 version 1.0.0:
  - Initial version.
