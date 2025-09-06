@@ -249,8 +249,12 @@ class AlbatrossDevice(object):
 
   @cached_property
   def agent_dex(self):
-    dst = Configuration.app_injector_dir + "app_agent.dex"
-    self.push_file(Configuration.app_agent_file, dst, mode='444')
+    injector_dir = Configuration.app_injector_dir
+    dst = injector_dir + "app_agent.dex"
+    res = self.push_file(Configuration.app_agent_file, dst, mode='444')
+    if res:
+      oat_dir = injector_dir + 'oat/' + self.abi_lib_name
+      self.root_shell('mkdir -p ' + oat_dir)
     return dst
 
   def get_file_md5(self, filepath):
@@ -263,7 +267,7 @@ class AlbatrossDevice(object):
     self.root_shell('rm -rf {}'.format(file_path))
     return self.ret_code == 0
 
-  def push_file(self, file, dst, check=False, mode=None):
+  def push_file(self, file, dst, check=False, mode=None, file_type=None):
     if not os.path.exists(file):
       return False
     md5_dst = file_md5(file)
@@ -274,6 +278,8 @@ class AlbatrossDevice(object):
         dst += os.path.basename(file)
       md5_src = self.get_file_md5(dst)
       if md5_dst == md5_src:
+        if file_type:
+          self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
         return False
     if self.shell_user == 'shell':
       self.delete_file(dst)
@@ -283,6 +289,8 @@ class AlbatrossDevice(object):
     if res:
       if mode:
         self.shell('chmod {} {}'.format(mode, dst))
+      if file_type:
+        self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
       print(s)
       return res
     if self.is_root and self.shell_user == 'shell':
@@ -296,6 +304,8 @@ class AlbatrossDevice(object):
           print(s)
           if mode:
             self.root_shell('chmod {} {}'.format(mode, dst))
+          if file_type:
+            self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
           return True
     return False
 
@@ -339,23 +349,31 @@ class AlbatrossDevice(object):
     else:
       self.root_shell("setenforce 0")
 
+  def is_selinux_on(self):
+    return self.shell('getenforce') == 'Enforcing'
+
   @cached_property
   def support_32(self):
     return not not self.pidof('zygote')
 
+  @cached_property
+  def file_type(self):
+    if self.is_selinux_on():
+      return 'albatross_file'
+    return None
+
   def get_client(self) -> AlbatrossClient:
     if not self.is_root:
       raise DeviceNotRoot(self)
-    self.setenforce(False)
     server_dst_path = Configuration.server_dst_path
     server_dst_path = '/data/local/tmp/' + server_dst_path
     server_port = Configuration.server_port
     local_port = self.get_forward_port(server_port)
-    device_abi = self.cpu_api
+    device_abi = self.cpu_abi
     server_file, abi_lib, abi_lib32 = Configuration.get_server_path(device_abi)
     assert os.path.exists(server_file)
     update = self.push_file(server_file, server_dst_path)
-    lib_dst = Configuration.lib_path + Configuration.abi_lib_names[device_abi] + '/'
+    lib_dst = Configuration.lib_path + self.abi_lib_name + '/'
     update += self.push_file(abi_lib, lib_dst)
     self.lib_dir = lib_dst
     self.lib_dst = lib_dst + Configuration.lib_name
@@ -387,6 +405,8 @@ class AlbatrossDevice(object):
     client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
     if lib_dst_32:
       client.set_2nd_arch_lib(lib_dst_32)
+    if self.is_selinux_on():
+      client.patch_selinux()
     return client
 
   def restart_system_server(self):
@@ -397,10 +417,13 @@ class AlbatrossDevice(object):
 
   def on_system_subscribe_close(self, client):
     print('system_server subscriber close')
-    if client.reconnect():
-      client.subscribe()
-    else:
-      cached_property.delete(self, "system_server_subscriber")
+    try:
+      if client.reconnect():
+        client.subscribe()
+        return
+    except:
+      pass
+    cached_property.delete(self, "system_server_subscriber")
 
   def on_system_client_close(self, client):
     print('system_server client close')
@@ -420,10 +443,17 @@ class AlbatrossDevice(object):
   def system_server_client(self) -> SystemServerClient:
     client = self.client
     agent_dst = Configuration.system_server_agent_dst
-    update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444')
+    if not self.is_selinux_on():
+      client.patch_selinux()
+    update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444', file_type=self.file_type)
     if update:
-      self.restart_system_server()
-      time.sleep(20)
+      agent_dir = os.path.dirname(agent_dst)
+      oat_dir = agent_dir + '/oat/' + self.abi_lib_name
+      self.root_shell('mkdir -p ' + oat_dir)
+      server_pid = client.get_process_pid('system_server')
+      if server_pid > 0 and client.is_injected(server_pid):
+        self.restart_system_server()
+        time.sleep(20)
     server_pid = client.get_process_pid('system_server')
     if server_pid <= 0:
       self.restart_system_server()
@@ -459,13 +489,17 @@ class AlbatrossDevice(object):
 
   @cached_property
   def is_64(self):
-    return '64' in self.cpu_api
+    return '64' in self.cpu_abi
 
   @cached_property
-  def cpu_api(self):
-    cpu_api = self.shell('getprop ro.product.cpu.abi')
-    if cpu_api:
-      return cpu_api
+  def abi_lib_name(self):
+    return Configuration.abi_lib_names[self.cpu_abi]
+
+  @cached_property
+  def cpu_abi(self):
+    cpu_abi = self.shell('getprop ro.product.cpu.abi')
+    if cpu_abi:
+      return cpu_abi
     file_type = self.shell('file /system/bin/sh')
     if 'arm64' in file_type:
       return 'arm64-v8a'
