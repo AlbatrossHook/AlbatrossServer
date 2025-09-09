@@ -100,6 +100,8 @@ public class AlbatrossInjectEntry {
     return 0;
   }
 
+  static boolean isApplicationOnCreateCalled = false;
+
   @TargetClass
   static class InstrumentationHook {
 
@@ -108,22 +110,25 @@ public class AlbatrossInjectEntry {
 
     @MethodHook
     static void callApplicationOnCreate$Hook(Instrumentation instrumentation, Application app) {
-      for (AlbatrossInjector injector : injectorMap.values()) {
-        injector.beforeApplicationCreate(app);
-      }
-      callApplicationOnCreate(instrumentation, app);
-      for (AlbatrossInjector injector : injectorMap.values()) {
-        injector.afterApplicationCreate(app);
+      if (!isApplicationOnCreateCalled) {
+        isApplicationOnCreateCalled = true;
+        for (AlbatrossInjector injector : injectorMap.values()) {
+          injector.beforeApplicationCreate(app);
+        }
+        callApplicationOnCreate(instrumentation, app);
+        for (AlbatrossInjector injector : injectorMap.values()) {
+          injector.afterApplicationCreate(app);
+        }
+      } else {
+        callApplicationOnCreate(instrumentation, app);
       }
     }
   }
 
   @TargetClass(targetExec = ExecOption.DO_NOTHING, hookerExec = ExecOption.DO_NOTHING)
   static class InstrumentationConstructorHook {
-
     @ConstructorBackup
     static native void init$Backup(Instrumentation instrumentation);
-
 
     @ConstructorHook
     static void init(Instrumentation instrumentation) throws AlbatrossErr {
