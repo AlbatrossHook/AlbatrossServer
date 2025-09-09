@@ -15,7 +15,7 @@
 import struct
 from enum import IntEnum, IntFlag
 
-from .rpc_client import RpcClient
+from .rpc_client import RpcClient, byte
 from .rpc_client import rpc_api, broadcast_api, void, ByteEnum
 
 
@@ -154,9 +154,10 @@ class AlbatrossClient(RpcClient):
     print('system server die')
 
   @broadcast_api
-  def launch_process(self, process_info: dict):
+  def launch_process(self, process_info: dict) -> byte:
     if self.can_send:
       raise Exception("launch_process should register handler")
+    return 1
 
   @rpc_api
   def patch_selinux(self) -> bool:

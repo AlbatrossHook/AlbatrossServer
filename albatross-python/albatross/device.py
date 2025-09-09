@@ -432,7 +432,7 @@ class AlbatrossDevice(object):
 
   @cached_property
   def system_server_subscriber(self) -> SystemServerClient:
-    port = self.get_forward_port(SystemServerClient.remote_addr)
+    port = self.get_forward_port(Configuration.system_server_address)
     subscribe_client = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
     subscribe_client.set_on_close_listener(self.on_system_subscribe_close)
     subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
