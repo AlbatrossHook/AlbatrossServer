@@ -198,7 +198,7 @@ class AlbatrossClient(RpcClient):
     print('system server die')
 
   @broadcast_api
-  def launch_process(self, uid, pid, process_info: dict) -> void:
+  def launch_process(self, uid: int, pid: int, process_info: dict) -> void:
     pass
 
   @rpc_api

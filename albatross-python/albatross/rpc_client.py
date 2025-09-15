@@ -549,7 +549,7 @@ class RpcMeta(type):
           argcount = attr_value.__code__.co_argcount
           if 'return' in annotations:
             if argcount != len(annotations):
-              raise WrongAnnotation('all argument should mark type')
+              raise WrongAnnotation(f'api {key} all argument should mark type')
           elif argcount != len(annotations) + 1:
             raise WrongAnnotation(f'function {key} all argument should mark type')
           for name, arg_type in annotations.items():

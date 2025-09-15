@@ -1,4 +1,3 @@
-import sys
 import time
 
 import albatross
@@ -17,7 +16,7 @@ def main(device_id=None):
     if 'albatross' in pkg and 'inject_demo' not in pkg:
       continue
     print('try test', pkg)
-    device.launch(pkg, plugin_apk, plugin_class)
+    device.launch_fast(pkg, plugin_apk, plugin_class)
     time.sleep(8)
   albatross.destroy()
   print('finish test')

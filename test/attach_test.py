@@ -1,4 +1,3 @@
-import sys
 import time
 
 import albatross
@@ -10,8 +9,8 @@ def main(device_id=None):
   assert device.is_root
   device.wake_up()
   user_pkgs = device.get_user_packages()
-  inject_dex = Configuration.resource_dir + "plugins/injector_demo.apk"
-  inject_class = "qing/albatross/app/agent/DemoInjector"
+  plugin_dex = Configuration.resource_dir + "plugins/plugin_demo.dex"
+  plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   for pkg in user_pkgs:
     if 'albatross' in pkg and 'inject_demo' not in pkg:
       continue
@@ -19,14 +18,15 @@ def main(device_id=None):
     device.stop_app(pkg)
     device.start_app(pkg)
     time.sleep(5)
-    device.attach(pkg, inject_dex, None, inject_class)
+    device.attach(pkg, plugin_dex, plugin_class)
     device.home()
     for i in range(3):
       device.switch_app()
       time.sleep(1)
       device.switch_app()
+      time.sleep(2)
+  albatross.destroy()
   print('finish test')
-  sys.stdin.read()
 
 
 if __name__ == '__main__':
