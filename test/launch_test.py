@@ -11,7 +11,7 @@ def main(device_id=None):
   device.wake_up()
   device.home()
   user_pkgs = device.get_user_packages()
-  plugin_apk = Configuration.resource_dir + "plugins/injector_demo.apk"
+  plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   for pkg in user_pkgs:
     if 'albatross' in pkg and 'inject_demo' not in pkg:

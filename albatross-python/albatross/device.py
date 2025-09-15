@@ -541,6 +541,7 @@ class AlbatrossDevice(object):
     if clear_history_launch:
       launch_callback.clear()
       self.client.clear_plugins()
+    assert os.path.exists(plugin_dex)
     server_client = self.system_server_client
     assert server_client.init_intercept() != 0
     server_client.force_stop_app(target_package)
@@ -580,6 +581,7 @@ class AlbatrossDevice(object):
     if not self.init_plugin_env:
       return False
     client = self.client
+    assert os.path.exists(plugin_dex)
     plugin_dex_device = Configuration.app_injector_dir + os.path.basename(plugin_dex)
     self.push_file(plugin_dex, plugin_dex_device, mode='444')
     plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, arg_str, arg_int)
