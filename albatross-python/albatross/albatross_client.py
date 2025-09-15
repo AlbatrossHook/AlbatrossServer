@@ -29,7 +29,7 @@ class InjectFlag(IntEnum):
   UNIX = 0x20
 
 
-class LoadDexFlag(IntFlag):
+class AlbatrossInitFlags(IntFlag):
   NONE = 0
   INIT_CLASS = 0x1
   DEBUG = 0x2
@@ -43,6 +43,7 @@ class LoadDexFlag(IntFlag):
   FLAG_FIELD_DISABLED = 0x200
   FLAG_INJECT = 0x800
   FLAG_INIT_RPC = 0x1000
+  FLAG_CALL_CHAIN = 0x2000
 
 
 class InjectResult(ByteEnum):
@@ -63,6 +64,7 @@ class RunTimeISA(ByteEnum):
 
 
 class DexLoadResult(ByteEnum):
+  DEX_SEND_ERR = 0
   DEX_NOT_EXIT = 1
   DEX_NO_JVM = 2
   DEX_VM_ERR = 3
@@ -74,12 +76,17 @@ class DexLoadResult(ByteEnum):
   DEX_ALREADY_LOAD = 21
 
 
-class DexSetResult(ByteEnum):
-  DEX_SET_OK = 0,
-  DEX_SET_ALREADY = 1
+class SetResult(ByteEnum):
+  SET_OK = 0,
+  SET_ALREADY = 1,
+  NOT_EXISTS = 2
+  SYSTEM_CRASHED = 3
+  DATA_ERR = 4
 
 
 class AlbatrossClient(RpcClient):
+  lib_path = None
+  class_name = None
 
   @rpc_api
   def get_process_isa(self, pid: int) -> RunTimeISA:
@@ -118,14 +125,44 @@ class AlbatrossClient(RpcClient):
     pass
 
   @rpc_api
-  def load_injector(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
-      agent_register_func: str, flags: LoadDexFlag, injector_dex: str, injector_lib: str,
-      injector_class: str, injector_arg_str: str, injector_arg_init: int) -> DexLoadResult:
+  def load_plugin(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
+      agent_register_func: str, flags: AlbatrossInitFlags, plugin_dex: str, plugin_lib: str,
+      plugin_class: str, plugin_arg_str: str, plugin_arg_init: int) -> DexLoadResult:
+    pass
+
+  @rpc_api
+  def load_system_plugin(self, plugin_dex: str, plugin_lib: str, plugin_class: str, arg_str: str,
+      arg_int: int) -> DexLoadResult:
+    pass
+
+  @rpc_api
+  def register_plugin(self, plugin_id: int, plugin_dex: str, plugin_lib: str, plugin_class: str, arg_str: str,
+      arg_int: int) -> SetResult:
+    pass
+
+  @rpc_api
+  def delete_plugin(self, plugin_id: int) -> byte:
+    pass
+
+  @rpc_api
+  def clear_plugins(self) -> int:
+    pass
+
+  @rpc_api
+  def modify_plugin(self, plugin_id: int, plugin_class: str, arg_str: str, arg_init: int) -> byte:
+    pass
+
+  @rpc_api
+  def delete_plugin_rule(self, plugin_id: int, app_id: int) -> bool:
+    pass
+
+  @rpc_api
+  def add_plugin_rule(self, plugin_id: int, app_id: int) -> SetResult:
     pass
 
   @rpc_api
   def load_dex(self, pid: int, dex_path: str, lib_path: str | None, register_class: str, class_name: str,
-      loader_symbol_name: str, flags: LoadDexFlag) -> DexLoadResult:
+      agent_register_func: str, flags: AlbatrossInitFlags, p1: str, p2: int) -> DexLoadResult:
     pass
 
   @rpc_api
@@ -141,8 +178,15 @@ class AlbatrossClient(RpcClient):
     pass
 
   @rpc_api
-  def set_system_server_agent(self, dex_path: str, server_name: str = 'system_server',
-      load_flags: LoadDexFlag = LoadDexFlag.NONE) -> DexSetResult:
+  def set_system_server_agent(self, dex_path: str, init_class: str, server_name: str = 'system_server',
+      load_flags: AlbatrossInitFlags = AlbatrossInitFlags.NONE,
+      address: str = "albatross_system_server", init_flags: int = 0) -> SetResult:
+    pass
+
+  @rpc_api
+  def set_app_agent(self, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
+      agent_register_func: str = "albatross_load_init",
+      flags: AlbatrossInitFlags = AlbatrossInitFlags.NONE) -> SetResult:
     pass
 
   @broadcast_api
@@ -154,10 +198,8 @@ class AlbatrossClient(RpcClient):
     print('system server die')
 
   @broadcast_api
-  def launch_process(self, process_info: dict) -> byte:
-    if self.can_send:
-      raise Exception("launch_process should register handler")
-    return 1
+  def launch_process(self, uid, pid, process_info: dict) -> void:
+    pass
 
   @rpc_api
   def patch_selinux(self) -> bool:

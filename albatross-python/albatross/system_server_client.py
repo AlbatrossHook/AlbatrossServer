@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-from .albatross_client import AlbatrossClient, InjectFlag
+from .albatross_client import AlbatrossClient, InjectFlag, AlbatrossInitFlags
 from .rpc_client import rpc_api, broadcast_api, byte, RpcClient
 from .wrapper import cached_class_property
 
@@ -26,8 +26,8 @@ class SystemServerClient(RpcClient):
     return InjectFlag.KEEP | InjectFlag.UNIX
 
   @cached_class_property
-  def dex_flags(self):
-    return 0
+  def albatross_init_flags(self):
+    return AlbatrossInitFlags.NONE
 
   @rpc_api
   def init(self) -> bool:
@@ -73,6 +73,6 @@ class SystemServerClient(RpcClient):
     pass
 
   @broadcast_api
-  def launch_process(self, process_info: dict) -> byte:
+  def launch_process(self, uid: int, pid: int, process_info: dict) -> byte:
     print('launch process', process_info)
     return byte(0)

@@ -14,6 +14,7 @@
 
 
 import json
+import os
 import select
 import socket
 import struct
@@ -292,7 +293,7 @@ class AlbRpcMethod(object):
     if parser:
       self.parser = parser
 
-  def __call__(self, *args, hint=None, timeout=None, **kwargs):
+  def __call__(self, *args, hint=None, timeout=None, silence=False, **kwargs):
     client = self.client
     method_name = self.name
     if client.prohibit_request:
@@ -302,7 +303,10 @@ class AlbRpcMethod(object):
     method_id = call_counter & CALL_ID_MASK
     client.call_counter = call_counter + 1
     rpc_name = client.name
-    quiet = client.quiet
+    if silence:
+      quiet = True
+    else:
+      quiet = client.quiet
     if not quiet:
       method_id_name = method_name + "|" + str(method_id)
       if hint:
@@ -597,24 +601,46 @@ use_polling = not use_epoll and not use_kqueue
 
 
 class SocketMonitor(threading.Thread):
+  _wake_event: threading.Event
 
   def __init__(self):
     super().__init__()
     self.name = 'socket monitor'
     if use_epoll:
       self.poll = select.epoll()
+      self._wake_reader, self._wake_writer = socket.socketpair()
+      self._wake_fileno = self._wake_reader.fileno()
+      self.poll.register(self._wake_fileno, select.EPOLLIN | select.EPOLLERR | select.EPOLLRDHUP)
     elif use_kqueue:
       self.poll = select.kqueue()
+      self._wake_reader, self._wake_writer = socket.socketpair()
+      self._wake_fileno = self._wake_reader.fileno()
+      # 注册唤醒socket到kqueue
+      kevent = select.kevent(self._wake_fileno, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)
+      self.poll.control([kevent], 0)
     else:
       self.poll = None
       self._poll_lock = threading.Lock()
-      self._sockets_to_poll = []
-
+      self._wake_reader, self._wake_writer = os.pipe()
+      self._sockets_to_poll = [self._wake_reader]
+      self._wake_fileno = self._wake_reader
+      self._wake_event = threading.Event()
     self.callbacks = {}
     self.running = True
 
+  def _wake(self):
+    try:
+      if use_epoll or use_kqueue:
+        self._wake_writer.send(b'stop')
+      else:
+        os.write(self._wake_writer, b'stop')
+    except Exception:
+      pass
+
   def register_socket(self, sock, callback, extra_flag=None):
     fileno = sock.fileno()
+    if fileno == self._wake_fileno:
+      return
     if use_epoll:
       if extra_flag is None:
         extra_flag = select.EPOLLET
@@ -628,27 +654,65 @@ class SocketMonitor(threading.Thread):
     else:
       with self._poll_lock:
         self._sockets_to_poll.append(sock)
+      self._wake_event.set()
     self.callbacks[fileno] = (sock, callback, extra_flag)
 
   def unregister_socket(self, fileno):
+    if fileno == self._wake_fileno:
+      return False
     v = self.callbacks.pop(fileno, None)
     if not v:
       return False
-    if use_epoll:
-      self.poll.unregister(fileno)
-    elif use_kqueue:
-      kevent = select.kevent(fileno, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_DELETE)
-      self.poll.control([kevent], 0)
-    else:
-      sock, _, _ = v
-      with self._poll_lock:
-        if sock in self._sockets_to_poll:
-          self._sockets_to_poll.remove(sock)
+    try:
+      if use_epoll:
+        self.poll.unregister(fileno)
+      elif use_kqueue:
+        kevent = select.kevent(fileno, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_DELETE)
+        self.poll.control([kevent], 0)
+      else:
+        sock, _, _ = v
+        with self._poll_lock:
+          if sock in self._sockets_to_poll:
+            self._sockets_to_poll.remove(sock)
+        # self._wake_event.set()
+    except:
+      pass
     return v[1]
 
+  def stop(self):
+    if not self.running:
+      return
+    self.running = False
+    self._wake()
+    filenos = list(self.callbacks.keys())
+    for fileno in filenos:
+      self.unregister_socket(fileno)
+    if self.is_alive():
+      self.join(timeout=5)
+      if self.is_alive():
+        print("Warning: SocketMonitor thread did not terminate properly")
+    else:
+      print('socket monitor closed')
+    try:
+      if use_epoll or use_kqueue:
+        self._wake_reader.close()
+        self._wake_writer.close()
+      else:
+        self._wake_event.set()
+        os.close(self._wake_reader)
+        os.close(self._wake_writer)
+    except Exception as e:
+      print(f"Error closing wake resources: {e}")
+    # 关闭poll对象
+    if self.poll:
+      try:
+        self.poll.close()
+      except Exception as e:
+        print(f"Error closing poll object: {e}")
+
   def run(self):
+    none_value = (None, None, None)
     while self.running:
-      none_value = (None, None, None)
       if use_epoll:
         events = self.poll.poll()
         for file_no, event in events:
@@ -658,7 +722,8 @@ class SocketMonitor(threading.Thread):
               callback(True, sock)
             self.unregister_socket(file_no)
           else:
-            print('unsupported event', hex(event))
+            continue
+            # print('unsupported event', hex(event))
       elif use_kqueue:
         events = self.poll.control(None, 1)  # 等待至少1个事件
         for kev in events:
@@ -676,6 +741,7 @@ class SocketMonitor(threading.Thread):
               continue
             callback(False, sock)
       else:
+        self._wake_event.clear()
         with self._poll_lock:
           sockets_to_check = list(self._sockets_to_poll)
         if sockets_to_check:
@@ -703,10 +769,10 @@ class SocketMonitor(threading.Thread):
               callback(True, sock)
             self.unregister_socket(fileno)
         else:
-          time.sleep(2)  # 10ms
+          self._wake_event.wait(2)
 
 
-global_socket_monitor = None
+global_socket_monitor: SocketMonitor | None = None
 
 
 def get_monitor() -> SocketMonitor:
@@ -715,6 +781,13 @@ def get_monitor() -> SocketMonitor:
     global_socket_monitor = SocketMonitor()
     global_socket_monitor.start()
   return global_socket_monitor
+
+
+def close_monitor():
+  global global_socket_monitor
+  if global_socket_monitor is not None:
+    global_socket_monitor.stop()
+    global_socket_monitor = None
 
 
 class RpcClient(metaclass=RpcMeta):
@@ -820,6 +893,7 @@ class RpcClient(metaclass=RpcMeta):
       if self.on_close_callback:
         try:
           self.on_close_callback(self)
+          self.on_close_callback = None
         except:
           traceback.print_exc()
       return True
@@ -889,7 +963,8 @@ class RpcClient(metaclass=RpcMeta):
       if elapse_time < 8:
         return
       self.on_close(is_close, sock)
-      get_monitor().unregister_socket(sock.fileno())
+      if not is_close:
+        get_monitor().unregister_socket(sock.fileno())
       return
     self.__subscribe_loop()
 
@@ -922,18 +997,20 @@ class RpcClient(metaclass=RpcMeta):
               cmd, idx, to_send = convertor(cmd, idx, result)
           else:
             cmd = BROADCAST_RESULT_NO_HANDLER
-            print('no handler! receive', idx, cmd, data)
+            print(broadcast_name + ' no handler! receive', idx, cmd, data)
         except Exception as e:
           traceback.print_exc()
         if should_send and not self.send_count:
           self.send(cmd, to_send, idx)
+        if use_polling:
+          return
     except Exception as e:
       if self.continuous:
         traceback.print_exc()
         print(f'{self.name} subscriber close:', e)
     self.close()
 
-  subscribe_thread: threading.Thread | None = None
+  subscribe_thread: threading.Thread | bool | None = None
 
   def join_subscribe(self):
     subscribe_thread = self.subscribe_thread
@@ -961,11 +1038,13 @@ class RpcClient(metaclass=RpcMeta):
   def parse_subscribe(self, data, result):
     if result >= 0:
       if use_polling:
-        get_monitor().unregister_socket(self.sock.fileno())
-      subscribe_thread = threading.Thread(target=self.__subscribe_loop, name='{}:subscribe'.format(self.name))
-      subscribe_thread.start()
-      self.subscribe_thread = subscribe_thread
-      return subscribe_thread
+        self.subscribe_thread = True
+        return True
+      else:
+        subscribe_thread = threading.Thread(target=self.__subscribe_loop, name='{}:subscribe'.format(self.name))
+        subscribe_thread.start()
+        self.subscribe_thread = subscribe_thread
+        return subscribe_thread
     return None
 
   @rpc_api

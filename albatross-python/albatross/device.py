@@ -19,9 +19,10 @@ import subprocess
 import sys
 import time
 
-from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, LoadDexFlag, RunTimeISA
+from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA
 from .common import Configuration, run_shell
 from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled
+from .plugin import Plugin
 from .rpc_client import byte
 from .system_server_client import SystemServerClient
 from .wrapper import cached_property
@@ -115,6 +116,7 @@ class AlbatrossDevice(object):
   update_kill = True
   lib32_dst: str
   max_launch_count = 20
+  reconnect = True
 
   def __init__(self, device_id):
     self.device_id = device_id
@@ -389,6 +391,7 @@ class AlbatrossDevice(object):
     else:
       try:
         client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
+        client.set_arch_lib(self.lib_dst)
         if lib_dst_32:
           client.set_2nd_arch_lib(lib_dst_32)
         return client
@@ -416,19 +419,21 @@ class AlbatrossDevice(object):
     time.sleep(1)
 
   def on_system_subscribe_close(self, client):
-    print('system_server subscriber close')
-    try:
-      if client.reconnect():
-        client.subscribe()
-        return
-    except:
-      pass
-    cached_property.delete(self, "system_server_subscriber")
+    if self.reconnect:
+      print('system_server subscriber close')
+      try:
+        if client.reconnect():
+          client.subscribe()
+          return
+      except:
+        pass
+      cached_property.delete(self, "system_server_subscriber")
 
   def on_system_client_close(self, client):
-    print('system_server client close')
-    if not client.reconnect():
-      cached_property.delete(self, "system_server_client")
+    if self.reconnect:
+      print('system_server client close')
+      if not client.reconnect():
+        cached_property.delete(self, "system_server_client")
 
   @cached_property
   def system_server_subscriber(self) -> SystemServerClient:
@@ -464,9 +469,10 @@ class AlbatrossDevice(object):
     res = client.inject_albatross(server_pid, SystemServerClient.inject_flags, '')
     if res < 0:
       return cached_property.nil_value
+    unix_address = Configuration.system_server_listen_address
     res = client.load_dex(server_pid, agent_dst, None, Configuration.albatross_class_name,
       Configuration.system_server_init_class, Configuration.albatross_register_func,
-      SystemServerClient.dex_flags, timeout=30)
+      SystemServerClient.albatross_init_flags, unix_address, 0, timeout=30)
     if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
       port = self.get_forward_port(Configuration.system_server_address)
       system_server = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
@@ -514,64 +520,109 @@ class AlbatrossDevice(object):
 
   app_inject_flags = InjectFlag.KEEP | InjectFlag.UNIX
 
-  def on_launch_process(self, process_info: dict) -> byte:
-    print('launch process', process_info)
-    uid = process_info['uid']
+  def on_launch_process(self, uid: int, pid: int, process_info: dict) -> byte:
+    print(f'launch process {uid}:{pid}', process_info)
     inject_record = self.process_launch_callback.get(uid)
     if inject_record:
       count = self.app_launch_count[uid]
       self.app_launch_count[uid] = count + 1
       if count < self.max_launch_count:
-        pid = process_info['pid']
-        inject_dex, dex_lib, injector_class, arg_str, arg_int = inject_record
-        self.attach(pid, inject_dex, dex_lib, injector_class, arg_str, arg_int, LoadDexFlag.FLAG_INJECT)
+        plugin_dex, plugin_lib, plugin_class, arg_str, arg_int = inject_record
+        self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int, AlbatrossInitFlags.FLAG_INJECT)
+      else:
+        return 0
     return 1
 
-  def launch(self, target_package, inject_dex, dex_lib, injector_class, arg_str: str = None, arg_int: int = 0):
+  def launch(self, target_package, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None, arg_int: int = 0):
     if not self.is_app_install(target_package):
       raise PackageNotInstalled(target_package)
     launch_callback = self.process_launch_callback
     clear_history_launch = Configuration.clear_history_launch
     if clear_history_launch:
       launch_callback.clear()
+      self.client.clear_plugins()
     server_client = self.system_server_client
     assert server_client.init_intercept() != 0
     server_client.force_stop_app(target_package)
     app_id = server_client.set_intercept_app(target_package, clear_history_launch)
     assert self.system_server_subscriber
-    launch_callback[app_id] = (inject_dex, dex_lib, injector_class, arg_str, arg_int)
+    launch_callback[app_id] = (plugin_dex, plugin_lib, plugin_class, arg_str, arg_int)
     self.app_launch_count[app_id] = 0
     server_client.start_activity(target_package, None, 0)
 
-  def attach(self, package_or_pid, inject_dex, dex_lib, injector_class, arg_str: str = None, arg_int: int = 0,
-      init_flags=LoadDexFlag.NONE):
+  @cached_property
+  def init_plugin_env(self):
+    try:
+      client = self.client
+      agent_dst = Configuration.system_server_agent_dst
+      update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444', file_type=self.file_type)
+      if update:
+        agent_dir = os.path.dirname(agent_dst)
+        oat_dir = agent_dir + '/oat/' + self.abi_lib_name
+        self.root_shell('mkdir -p ' + oat_dir)
+        server_pid = client.get_process_pid('system_server')
+        if server_pid > 0 and client.is_injected(server_pid):
+          self.restart_system_server()
+          time.sleep(20)
+      client.set_system_server_agent(agent_dst, Configuration.system_server_init_class, "system_server",
+        AlbatrossInitFlags.NONE, Configuration.system_server_listen_address, 3)
+      client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
+        Configuration.albatross_agent_class, Configuration.albatross_register_func, AlbatrossInitFlags.NONE)
+      return True
+    except:
+      return cached_property.nil_value
+
+  def launch_fast(self, target_package, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None,
+      arg_int: int = 0):
+    uid = self.get_package_uid(target_package)
+    if not uid:
+      return False
+    if not self.init_plugin_env:
+      return False
+    client = self.client
+    plugin_dex_device = Configuration.app_injector_dir + os.path.basename(plugin_dex)
+    self.push_file(plugin_dex, plugin_dex_device, mode='444')
+    plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, arg_str, arg_int)
+    if not plugin.is_register:
+      client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, arg_str, arg_int)
+      plugin.is_register = True
+    elif plugin.need_flush:
+      client.modify_plugin(plugin.plugin_id, plugin_class, arg_str, arg_int)
+      plugin.need_flush = False
+    client.add_plugin_rule(plugin.plugin_id, uid)
+    self.stop_app(target_package)
+    self.start_app(target_package)
+    return True
+
+  def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None, arg_int: int = 0,
+      init_flags=AlbatrossInitFlags.NONE):
     if isinstance(package_or_pid, str):
       pids = self.pidof(package_or_pid)
     else:
       pids = [package_or_pid]
     success = []
     if pids:
-      assert os.path.exists(inject_dex)
+      assert os.path.exists(plugin_dex)
       client = self.client
-      inject_dex_dst = Configuration.app_injector_dir + os.path.basename(inject_dex)
-      self.push_file(inject_dex, inject_dex_dst, mode='444')
+      plugin_dex_device = Configuration.app_injector_dir + os.path.basename(plugin_dex)
+      self.push_file(plugin_dex, plugin_dex_device, mode='444')
       for pid in pids:
         pid_int = int(pid)
         res = client.inject_albatross(pid_int, self.app_inject_flags, None)
         if res >= 0:
-          if dex_lib:
-            assert os.path.exists(dex_lib)
+          if plugin_lib:
+            assert os.path.exists(plugin_lib)
             if client.get_process_isa(pid_int) in [RunTimeISA.ISA_X86_64, RunTimeISA.ISA_ARM64]:
-              lib_dst_device = self.lib_dir + os.path.basename(dex_lib)
+              lib_dst_device = self.lib_dir + os.path.basename(plugin_lib)
             else:
-              lib_dst_device = self.lib32_dir + os.path.basename(dex_lib)
-            self.push_file(dex_lib, lib_dst_device)
+              lib_dst_device = self.lib32_dir + os.path.basename(plugin_lib)
+            self.push_file(plugin_lib, lib_dst_device)
           else:
             lib_dst_device = None
           agent_dex = self.agent_dex
-          res = client.load_injector(pid_int, agent_dex, None, Configuration.albatross_class_name,
+          res = client.load_plugin(pid_int, agent_dex, None, Configuration.albatross_class_name,
             Configuration.albatross_agent_class, Configuration.albatross_register_func,
-            init_flags, inject_dex_dst, lib_dst_device, injector_class, arg_str,
+            init_flags, plugin_dex_device, lib_dst_device, plugin_class, arg_str,
             arg_int)
           if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
             success.append(pid_int)
@@ -646,8 +697,58 @@ class AlbatrossDevice(object):
     cmd = self.shellcmd + 'input keyevent KEYCODE_APP_SWITCH'
     run_shell(cmd)
 
+  def pull_file(self, src_android, dst_pc, is_del=False):
+    command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)
+    ret_code, res = run_shell(command)
+    if ret_code != 0:
+      if 'Permission denied' in str(res) and self.is_root:
+        self.shell('mkdir -p /data/local/tmp/pull')
+        dst_mv = '/data/local/tmp/pull/' + os.path.basename(src_android)
+        # if src_android[-1] == '/':
+        #   dst_mv = '/data/local/tmp/pull/' + os.path.basename(src_android)
+        # else:
+        #   dst_mv = '/data/local/tmp/pull'
+        self.root_shell('cp -r {} {}'.format(src_android, dst_mv))
+        self.root_shell('chown -R shell:shell ' + dst_mv)
+        # if src_android[-1] != '/':
+        #   command = self.cmd + ' pull "{}" "{}"'.format(dst_mv + '/' + os.path.basename(src_android), dst_pc)
+        # else:
+        command = self.cmd + ' pull "{}" "{}"'.format(dst_mv, dst_pc)
+        ret_code, res = run_shell(command)
+        self.root_shell('rm -rf {}'.format(dst_mv))
+        if is_del:
+          self.root_shell('rm -rf {}'.format(src_android))
+        return ret_code == 0
+      return False
+    if not is_del:
+      return True
+    del_command = self.shellcmd + " rm -rf " + src_android
+    ret_code, _ = run_shell(del_command)
+    if ret_code == 0:
+      return True
+    else:
+      return False
 
-_device_manager = None
+  def screenshot(self, path):
+    command = self.shellcmd + "screencap -p  /sdcard/screen.png"
+    ret_code, _ = run_shell(command)
+    if ret_code != 0:
+      return False
+    dirpath = os.path.dirname(path)
+    if dirpath and not os.path.exists(dirpath):
+      os.makedirs(dirpath)
+    return self.pull_file("/sdcard/screen.png", path)
+
+  def get_package_uid(self, pkg):
+    cmd = self.shellcmd + '"dumpsys package ' + pkg + '| grep userId"'
+    ret_str = run_shell(cmd)[1].decode("utf-8")
+    if not ret_str:
+      cmd = self.shellcmd + '"dumpsys package ' + pkg + '| grep uid"'
+      ret_str = run_shell(cmd)[1].decode("utf-8")
+    return int(ret_str.split("=")[1].split(maxsplit=1)[0].strip())
+
+  def __repr__(self):
+    return "Device: {}".format(self.device_id)
 
 
 class DeviceManager:
@@ -685,12 +786,32 @@ class DeviceManager:
     return device
 
 
-def get_device_manager() -> "DeviceManager":
-  """
-  Get or create a singleton DeviceManager that let you manage all the devices
-  """
+_device_manager: DeviceManager | None = None
 
+
+def get_device_manager() -> "DeviceManager":
   global _device_manager
   if _device_manager is None:
     _device_manager = DeviceManager()
   return _device_manager
+
+
+def destroy_device():
+  global _device_manager
+  if _device_manager is not None:
+    devices = _device_manager.devices
+    for device_id, device in devices.items():
+      device: AlbatrossDevice
+      device.reconnect = False
+      system_server_subscriber = cached_property.pop(device, 'system_server_subscriber')
+      if system_server_subscriber != cached_property.nil_value:
+        system_server_subscriber.shutdown()
+      system_server_client = cached_property.pop(device, 'system_server_client')
+      if system_server_client is not cached_property.nil_value:
+        system_server_client.close()
+      client = cached_property.pop(device, 'client')
+      if client is not cached_property.nil_value:
+        client.close()
+    devices.clear()
+
+    _device_manager = None

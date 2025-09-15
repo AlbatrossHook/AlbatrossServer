@@ -50,6 +50,14 @@ class cached_property(object):
   def delete(obj, attr):
     obj.__dict__.pop(attr, None)
 
+  @staticmethod
+  def get(obj, attr):
+    return obj.__dict__.get(attr, nil_value)
+
+  @staticmethod
+  def pop(obj, attr):
+    return obj.__dict__.pop(attr, nil_value)
+
 
 class cached_class_property(object):
   v = nil_value
@@ -81,6 +89,14 @@ class cached_class_property(object):
   @staticmethod
   def delete(cls, attr):
     delattr(cls, attr)
+
+  @staticmethod
+  def pop(cls, attr):
+    if hasattr(cls, attr):
+      v = getattr(cls, attr)
+      delattr(cls, attr)
+      return v
+    return nil_value
 
   def __get__(self, obj, cls):
     func = self.func

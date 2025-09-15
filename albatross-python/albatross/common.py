@@ -158,8 +158,8 @@ class Configuration(object):
       arch_dir = jni_libs + arch + '/'
       if '64' in arch:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name,
-                      (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
-                        jni_libs + f'x86/{lib_name}', 'x86'))
+        (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
+          jni_libs + f'x86/{lib_name}', 'x86'))
       else:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name, None)
     return maps
@@ -176,5 +176,11 @@ class Configuration(object):
 
   system_server_address = __make_get('system_server_address', 'localabstract:albatross_system_server')
 
+  @cached_class_property
+  def system_server_listen_address(self):
+    address = self.system_server_address
+    assert address.startswith('localabstract:')
+    return address.split(':')[1]
+
   system_server_init_class = __make_get('system_server_init_class',
-    "qing/albatross/android/system_server/SystemServerRpc")
+    "qing/albatross/android/system_server/SystemServerInjectEntry")
