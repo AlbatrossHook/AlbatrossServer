@@ -1,4 +1,4 @@
-package qing.albatross.app.agent;
+package qing.albatross.plugin.app;
 
 import android.app.Activity;
 import android.widget.Toast;

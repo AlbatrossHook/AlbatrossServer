@@ -44,4 +44,5 @@ dependencies {
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
     compileOnly(project(":app_agent_lib"))
+    compileOnly(project(":agent_lib_common"))
 }

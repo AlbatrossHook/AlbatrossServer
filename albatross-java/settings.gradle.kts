@@ -67,8 +67,9 @@ if (!albatrossDirPath.isNullOrBlank()) {
 
 gradle.extra.set("albatrossSourceAvailable",areAlbatrossModulesIncluded)
 include(":app_agent")
+include(":agent_lib_common")
 include(":app_agent_lib")
-include(":injector_demo")
+include(":plugin_demo")
 include(":system_agent")
 
 

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:label="Plugin">
+        <meta-data
+            android:name="albatross_plugin"
+            android:value="true" />
+
+        <meta-data
+            android:name="plugin_name"
+            android:value="DemoPlugin" />
+
+        <meta-data
+            android:name="plugin_class"
+            android:value="qing.albatross.plugin.app.DemoPlugin" />
+
+        <meta-data
+            android:name="plugin_description"
+            android:value="this is a demo plugin" />
+
+        <meta-data
+            android:name="plugin_author"
+            android:value="QingWan" />
+        <!--        <meta-data-->
+        <!--            android:name="plugin_support"-->
+        <!--            android:value="app" />-->
+
+        <activity
+            android:name="qing.albatross.plugin.app.PluginActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="qing.albatross.PluginConfig" />
+            </intent-filter>
+        </activity>
+
+    </application>
+</manifest>
