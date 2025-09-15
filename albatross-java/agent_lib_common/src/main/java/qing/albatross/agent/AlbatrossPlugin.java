@@ -13,32 +13,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package qing.albatross.app.agent;
+package qing.albatross.agent;
 
 import android.app.Application;
 
 import qing.albatross.core.Albatross;
 
-public abstract class AlbatrossInjector {
+public abstract class AlbatrossPlugin {
 
   String argString;
   int flags;
   String libName;
 
 
-  public AlbatrossInjector(String libName, String argString, int flags) {
+  public AlbatrossPlugin(String libName, String argString, int flags) {
     this.argString = argString;
     this.flags = flags;
     this.libName = libName;
   }
 
-  boolean load() {
+  public boolean load() {
     try {
       if (libName != null)
         System.loadLibrary(libName);
       return true;
-    } catch (Exception e) {
-      Albatross.log("plug load", e);
+    } catch (Throwable e) {
+      Albatross.log("plugin load err", e);
       return false;
     }
   }
@@ -47,6 +47,10 @@ public abstract class AlbatrossInjector {
 
   public void beforeMakeApplication() {
   }
+
+  public void onAttachSystem(Application application) {
+  }
+
 
   abstract public void afterApplicationCreate(Application application);
 }
