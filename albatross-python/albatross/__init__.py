@@ -15,8 +15,16 @@
 from typing import Optional
 from . import device
 
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 
 
 def get_device(device_id: Optional[str] = None) -> device.AlbatrossDevice:
   return device.get_device_manager().get_devices(device_id)
+
+
+def destroy():
+  device.destroy_device()
+  from . import rpc_client
+  rpc_client.close_monitor()
+  from . import plugin
+  plugin.clear_plugin()
