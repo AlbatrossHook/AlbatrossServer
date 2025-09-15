@@ -18,12 +18,10 @@ package qing.albatross.app.agent;
 import android.app.Application;
 import android.app.Instrumentation;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.util.HashMap;
 import java.util.Map;
 
-import dalvik.system.DexClassLoader;
+import qing.albatross.agent.AlbatrossPlugin;
+import qing.albatross.agent.DynamicPluginManager;
 import qing.albatross.annotation.ConstructorBackup;
 import qing.albatross.annotation.ConstructorHook;
 import qing.albatross.annotation.ExecOption;
@@ -36,65 +34,22 @@ import qing.albatross.exception.AlbatrossErr;
 public class AlbatrossInjectEntry {
 
 
-  static Map<String, AlbatrossInjector> injectorMap;
-  static Map<String, DexClassLoader> dexClassLoaderMap;
-
-
   public static boolean loadLibrary(int flags, String dexPath, String dexLib, String className, String argString, int argInt) {
-    injectorMap = new HashMap<>();
-    dexClassLoaderMap = new HashMap<>();
-    return appendInjector(dexPath, dexLib, className, argString, argInt) == 0;
+    Albatross.log("AlbatrossInjectEntry.loadLibrary");
+    return appendPlugin(dexPath, dexLib, className, argString, argInt) == 0;
   }
 
-  static int appendInjector(String dexPath, String dexLib, String className, String argString, int argInt) {
-    String injectorKey = dexPath + className;
-    if (injectorMap.containsKey(injectorKey))
+  public static int appendPlugin(String dexPath, String dexLib, String className, String argString, int argInt) {
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(dexPath, dexLib, className, argString, argInt);
+    if (plugin == null)
       return 1;
-    DexClassLoader dexClassLoader = dexClassLoaderMap.get(dexPath);
-    String libDir;
-    String libName;
-    if (dexLib == null || dexLib.length() < 5) {
-      libDir = null;
-      libName = null;
-    } else {
-      int i = dexLib.lastIndexOf('/');
-      libDir = dexLib.substring(0, i);
-      libName = dexLib.substring(i + 4, dexLib.length() - 3);
-    }
-    if (dexClassLoader == null) {
-      dexClassLoader = new DexClassLoader(dexPath, null, libDir, AlbatrossInjectEntry.class.getClassLoader());
-      dexClassLoaderMap.put(dexPath, dexClassLoader);
-    }
-    AlbatrossInjector injector;
-    try {
-      Class<AlbatrossInjector> initClass = (Class<AlbatrossInjector>) dexClassLoader.loadClass(className);
-      Constructor<AlbatrossInjector> constructor = initClass.getDeclaredConstructor(String.class, String.class, int.class);
-      constructor.setAccessible(true);
-      injector = constructor.newInstance(libName, argString, argInt);
-      injectorMap.put(injectorKey, injector);
-    } catch (ClassNotFoundException e) {
-      Albatross.log("inject", e);
-      return 2;
-    } catch (IllegalAccessException e) {
-      Albatross.log("inject", e);
-      return 3;
-    } catch (InstantiationException e) {
-      Albatross.log("inject", e);
-      return 4;
-    } catch (InvocationTargetException e) {
-      Albatross.log("inject", e.getCause());
-      return 5;
-    } catch (NoSuchMethodException e) {
-      Albatross.log("inject", e);
-      return 6;
-    }
     Application application = Albatross.currentApplication();
     if (application != null) {
-      if (injector.load()) {
-        injector.beforeApplicationCreate(application);
-        injector.afterApplicationCreate(application);
+      if (plugin.load()) {
+        plugin.beforeApplicationCreate(application);
+        plugin.afterApplicationCreate(application);
       } else {
-        return 7;
+        return 2;
       }
     }
     return 0;
@@ -112,11 +67,12 @@ public class AlbatrossInjectEntry {
     static void callApplicationOnCreate$Hook(Instrumentation instrumentation, Application app) {
       if (!isApplicationOnCreateCalled) {
         isApplicationOnCreateCalled = true;
-        for (AlbatrossInjector injector : injectorMap.values()) {
+        Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
+        for (AlbatrossPlugin injector : pluginTable.values()) {
           injector.beforeApplicationCreate(app);
         }
         callApplicationOnCreate(instrumentation, app);
-        for (AlbatrossInjector injector : injectorMap.values()) {
+        for (AlbatrossPlugin injector : pluginTable.values()) {
           injector.afterApplicationCreate(app);
         }
       } else {
@@ -138,11 +94,13 @@ public class AlbatrossInjectEntry {
   }
 
   public static void init() {
-    for (AlbatrossInjector injector : injectorMap.values()) {
-      if (injector.load()) {
-        injector.beforeMakeApplication();
+    Albatross.log("AlbatrossInjectEntry.init");
+    Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
+    for (AlbatrossPlugin plugin : pluginTable.values()) {
+      if (plugin.load()) {
+        plugin.beforeMakeApplication();
       } else {
-        Albatross.log("injector load return false:" + injector.getClass());
+        Albatross.log("plugin load return false:" + plugin.getClass());
         return;
       }
     }

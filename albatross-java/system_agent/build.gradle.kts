@@ -57,6 +57,5 @@ dependencies {
         implementation("qing.albatross:server-release:1.0@aar")
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
-
-
+    implementation(project(":agent_lib_common"))
 }

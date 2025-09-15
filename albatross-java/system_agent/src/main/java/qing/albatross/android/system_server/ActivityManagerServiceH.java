@@ -15,7 +15,7 @@
  */
 package qing.albatross.android.system_server;
 
-import static qing.albatross.android.system_server.SystemServerRpc.shouldInterceptUid;
+import static qing.albatross.android.system_server.SystemServerInjectEntry.shouldInterceptUid;
 
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
@@ -65,8 +65,6 @@ public class ActivityManagerServiceH {
     if (shouldInterceptUid(callingUid)) {
       try {
         JSONObject jsonObject = new JSONObject();
-        jsonObject.put("uid", callingUid);
-        jsonObject.put("pid", pid);
         Object pids = mPidsSelfLocked.get(ams);
         Object processRecord;
         if (pids instanceof SparseArray) {
@@ -74,7 +72,6 @@ public class ActivityManagerServiceH {
           processRecord = sparseArray.get(pid);
         } else
           processRecord = PidMapH.get(pids, pid);
-
         String processName = ProcessRecordH.processName.get(processRecord);
         ApplicationInfo applicationInfo = ProcessRecordH.info.get(processRecord);
         if (applicationInfo != null) {
@@ -97,9 +94,7 @@ public class ActivityManagerServiceH {
           jsonObject.put("type", componentType);
           jsonObject.put("name", name);
         }
-
-
-        SystemServerRpc.v().launchProcess(jsonObject.toString());
+        SystemServerInjectEntry.v().notifyProcessLaunch(callingUid, pid, jsonObject.toString());
       } catch (Exception e) {
         Albatross.log("interceptCheck", e);
       }

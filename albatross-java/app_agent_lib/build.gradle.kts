@@ -44,4 +44,5 @@ dependencies {
         compileOnly("qing.albatross:core-release:1.0@aar")
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
+    compileOnly(project(":agent_lib_common"))
 }

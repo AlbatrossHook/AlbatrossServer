@@ -15,6 +15,7 @@
  */
 package qing.albatross.android.system_server;
 
+
 import qing.albatross.server.Broadcast;
 
 public interface SystemServerApi {
@@ -35,8 +36,13 @@ public interface SystemServerApi {
 
   boolean init();
 
+  int setInterceptApp(String packageName, boolean clear);
 
-  int setInterceptApp(String packageName,boolean clear);
+  void setIntercept(int uid);
+
+  void removeIntercept(int uid);
+
+  void clearIntercept();
 
   boolean forceStopApp(String pkgName);
 
@@ -52,8 +58,9 @@ public interface SystemServerApi {
   String getFrontActivityQuick();
 
 
+
   @Broadcast
-  byte launchProcess(String data);
+  byte launchProcess(int uid, int pid, String data);
 
 
 }

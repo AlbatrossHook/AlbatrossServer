@@ -32,6 +32,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import qing.albatross.agent.AlbatrossPlugin;
+import qing.albatross.agent.DynamicPluginManager;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.JsonFormatter;
@@ -39,11 +41,9 @@ import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
 
 
-public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi {
-
+public class SystemServerInjectEntry extends UnixRpcInstance implements SystemServerApi {
 
   static Map<Integer, String> interceptApps = new HashMap<>();
-
   static boolean interceptAll = false;
 
   public static boolean shouldInterceptUid(int callingUid) {
@@ -64,25 +64,34 @@ public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi 
 
   static class SingletonHolder {
     @SuppressLint("StaticFieldLeak")
-    static SystemServerRpc instance = new SystemServerRpc();
+    static SystemServerInjectEntry instance = new SystemServerInjectEntry();
   }
 
 
-  public static SystemServerRpc v() {
+  public static SystemServerInjectEntry v() {
     return SingletonHolder.instance;
   }
 
-  private SystemServerRpc() {
+  private SystemServerInjectEntry() {
   }
 
-  public static boolean loadLibrary(String libpath, int flags) {
+  public static boolean loadLibrary(String libpath, int flags, String p1, int p2) {
     try {
       if (Albatross.loadLibrary(libpath, flags & 0xffff))
         Albatross.initRpcClass(UnixRpcServer.class);
-      SystemServerRpc server = SystemServerRpc.v();
-      UnixRpcServer unixRpcServer = server.createServer("albatross_system_server", true);
+      SystemServerInjectEntry server = SystemServerInjectEntry.v();
+      if (p1 == null)
+        p1 = "albatross_system_server";
+      UnixRpcServer unixRpcServer = server.createServer(p1, true);
       if (unixRpcServer != null) {
         server.context = Albatross.currentApplication();
+        if ((p2 & 1) != 0) {
+          if (!server.init())
+            return false;
+          if ((p2 & 2) != 0)
+            server.initIntercept();
+          return server.isInit;
+        }
         return true;
       }
       return false;
@@ -133,8 +142,17 @@ public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi 
     return JsonFormatter.fmt(new Object[]{componentName.getPackageName(), componentName.getClassName()});
   }
 
+
   @Override
-  public native byte launchProcess(String data);
+  public native byte launchProcess(int uid, int pid, String data);
+
+
+  public void notifyProcessLaunch(int uid, int pid, String data) {
+    byte ret = launchProcess(uid, pid, data);
+    if (ret == 0) {
+      removeIntercept(uid);
+    }
+  }
 
 
   @Override
@@ -295,7 +313,6 @@ public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi 
     return count;
   }
 
-
   @Override
   public boolean init() {
     if (activityManager != null)
@@ -356,6 +373,21 @@ public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi 
     }
   }
 
+  @Override
+  public void setIntercept(int uid) {
+    interceptApps.put(uid, "intercept");
+  }
+
+  @Override
+  public void removeIntercept(int uid) {
+    interceptApps.remove(uid);
+  }
+
+  @Override
+  public void clearIntercept() {
+    interceptApps.clear();
+  }
+
 
   @Override
   public boolean forceStopApp(String pkgName) {
@@ -366,6 +398,18 @@ public class SystemServerRpc extends UnixRpcInstance implements SystemServerApi 
   @Override
   public String getAppProcesses() {
     return JsonFormatter.fmt(getAppProcessList(), false);
+  }
+
+
+  public static int appendPlugin(String pluginDex, String pluginLib, String pluginClass, String argString, int argInt) {
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDex, pluginLib, pluginClass, argString, argInt);
+    if (plugin != null) {
+      if (plugin.load()) {
+        plugin.onAttachSystem(Albatross.currentApplication());
+      }
+      return 0;
+    }
+    return 1;
   }
 
 
