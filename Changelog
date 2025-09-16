@@ -1,3 +1,9 @@
+version 2.0.0:
+ - Clean api is added.
+ - Add plugins to add, delete and modify apis.
+ - Support for system plugins.
+ - Add a new injection mode launch fast for faster speed.
+
 version 1.0.2:
  - Java rpc call improve.
 
