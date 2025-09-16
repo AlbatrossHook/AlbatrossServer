@@ -13,13 +13,14 @@ def main(device_id=None):
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
+  client.clear_plugins()
   for pkg in user_pkgs:
     if 'albatross' in pkg and 'inject_demo' not in pkg:
       continue
-    client.clear_plugins()
     print('try test', pkg)
     device.launch_fast(pkg, plugin_apk, plugin_class)
     time.sleep(8)
+  client.clear_plugins()
   albatross.destroy()
   print('finish test')
 

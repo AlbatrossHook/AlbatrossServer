@@ -374,7 +374,8 @@ class AlbatrossDevice(object):
     device_abi = self.cpu_abi
     server_file, abi_lib, abi_lib32 = Configuration.get_server_path(device_abi)
     assert os.path.exists(server_file)
-    update = self.push_file(server_file, server_dst_path, mode='544')
+    update = self.push_file(server_file, server_dst_path, mode='500')
+    self.shell('chown root:root ' + server_dst_path)
     lib_dst = Configuration.lib_path + self.abi_lib_name + '/'
     update += self.push_file(abi_lib, lib_dst)
     self.lib_dir = lib_dst
