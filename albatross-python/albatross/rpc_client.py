@@ -246,11 +246,11 @@ def put_bytes(b: bytes):
 
 
 arg_convert_tables = {int: put_int, str: put_string, str | None: put_string, bytes: put_bytes, bool: put_bool,
-                      float: put_float, double: put_double, byte: put_byte, long: put_long}
+  float: put_float, double: put_double, byte: put_byte, long: put_long}
 
 arg_read_tables = {int: read_int, str: read_string, str | None: read_string, byte: read_byte, bool: read_bool,
-                   float: read_float, double: read_double, short: read_short, long: read_long, dict: read_json,
-                   list: read_json}
+  float: read_float, double: read_double, short: read_short, long: read_long, dict: read_json,
+  list: read_json}
 
 
 class RpcException(Exception):
@@ -479,16 +479,16 @@ class EnumResultReader(object):
 
 
 return_type_mappings = {bool: staticmethod(parse_bool), int: staticmethod(parse_int),
-                        str: staticmethod(parse_str), bytes: staticmethod(parse_bytes),
-                        dict: staticmethod(parse_dict), list: staticmethod(parse_list),
-                        byte: staticmethod(parse_byte), long: staticmethod(parse_long),
-                        void: void}
+  str: staticmethod(parse_str), bytes: staticmethod(parse_bytes),
+  dict: staticmethod(parse_dict), list: staticmethod(parse_list),
+  byte: staticmethod(parse_byte), long: staticmethod(parse_long),
+  void: void}
 
 return_convert_mappings = {bool: staticmethod(convert_bool), int: staticmethod(convert_int),
-                           str: staticmethod(convert_string), bytes: staticmethod(convert_bytes),
-                           dict: staticmethod(convert_json), list: staticmethod(convert_json),
-                           void: None, short: staticmethod(convert_short), byte: staticmethod(convert_byte),
-                           }
+  str: staticmethod(convert_string), bytes: staticmethod(convert_bytes),
+  dict: staticmethod(convert_json), list: staticmethod(convert_json),
+  void: None, short: staticmethod(convert_short), byte: staticmethod(convert_byte),
+}
 
 
 def get_enum_real_type(t):
@@ -615,13 +615,12 @@ class SocketMonitor(threading.Thread):
       self.poll = select.kqueue()
       self._wake_reader, self._wake_writer = socket.socketpair()
       self._wake_fileno = self._wake_reader.fileno()
-      # 注册唤醒socket到kqueue
       kevent = select.kevent(self._wake_fileno, filter=select.KQ_FILTER_READ, flags=select.KQ_EV_ADD)
       self.poll.control([kevent], 0)
     else:
       self.poll = None
       self._poll_lock = threading.Lock()
-      self._wake_reader, self._wake_writer = os.pipe()
+      self._wake_reader, self._wake_writer = socket.socketpair()
       self._sockets_to_poll = [self._wake_reader]
       self._wake_fileno = self._wake_reader
       self._wake_event = threading.Event()
@@ -630,10 +629,7 @@ class SocketMonitor(threading.Thread):
 
   def _wake(self):
     try:
-      if use_epoll or use_kqueue:
-        self._wake_writer.send(b'stop')
-      else:
-        os.write(self._wake_writer, b'stop')
+      self._wake_writer.send(b'stop')
     except Exception:
       pass
 
@@ -694,16 +690,10 @@ class SocketMonitor(threading.Thread):
     else:
       print('socket monitor closed')
     try:
-      if use_epoll or use_kqueue:
-        self._wake_reader.close()
-        self._wake_writer.close()
-      else:
-        self._wake_event.set()
-        os.close(self._wake_reader)
-        os.close(self._wake_writer)
+      self._wake_reader.close()
+      self._wake_writer.close()
     except Exception as e:
       print(f"Error closing wake resources: {e}")
-    # 关闭poll对象
     if self.poll:
       try:
         self.poll.close()
