@@ -23,3 +23,5 @@ lib_name = "libalbatross_base.so"
 #server_port=
 #system_server_address=
 #system_server_init_class=
+#这里配置你下载的resource解压目录
+#resource_dir="xxxx/resource_v2.0.0_20250916/resource/"
