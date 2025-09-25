@@ -54,7 +54,7 @@ class SystemServerClient(RpcClient):
     pass
 
   @rpc_api
-  def start_activity(self, pkg: str, activity: str | None, uid: int) -> str:
+  def start_activity(self, pkg: str, activity: str | None, user_id: int) -> str:
     pass
 
   @rpc_api

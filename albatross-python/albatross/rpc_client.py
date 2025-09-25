@@ -526,10 +526,14 @@ class RpcMeta(type):
             if 'str | None' == arg_type_str:
               arg_type = str
             if name == 'return':
-              if issubclass(arg_type, Enum):
+              ret_f = attrs.get('parse_' + key, None)
+              if ret_f is not None:
+                if ret_f.__class__.__name__ == 'function':
+                  ret_f = staticmethod(ret_f)
+              elif issubclass(arg_type, Enum):
                 real_type = get_enum_real_type(arg_type)
                 ret_f = EnumResultParser(arg_type, return_type_mappings[real_type])
-              if arg_type in return_type_mappings:
+              elif arg_type in return_type_mappings:
                 ret_f = return_type_mappings[arg_type]
               elif hasattr(arg_type, 'parse_value'):
                 ret_f = getattr(arg_type, 'parse_value')

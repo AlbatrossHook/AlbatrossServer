@@ -19,47 +19,39 @@ from .wrapper import cached_class_property
 
 
 class Plugin(object):
-  is_register = False
-  need_flush = False
+  dex_device_dst = None
 
   @cached_class_property
   def plugin_tables(self):
     return {}
 
   @classmethod
-  def create(cls, plugin_dex: str, plugin_class: str, plugin_lib: str | None = None, param1: str = None,
-      param2: int = 0):
+  def create(cls, plugin_dex: str, plugin_class: str, plugin_lib: str | None = None,
+      plugin_params: str = None, plugin_flags: int = 0):
     file_path_abs = os.path.abspath(plugin_dex)
     plugin_tables = cls.plugin_tables
     if file_path_abs in plugin_tables:
       plugin = plugin_tables[file_path_abs]
-      change_value = []
-      if plugin.plugin_class != plugin_class:
-        plugin.plugin_class = plugin_class
-        change_value.append(plugin_class)
-      if plugin.plugin_lib != plugin_lib:
-        plugin.plugin_lib = plugin_lib
-        change_value.append(plugin_lib)
-      if plugin.param1 != param1:
-        plugin.param1 = param1
-        change_value.append(param1)
-      if plugin.param2 != param2:
-        plugin.param2 = param2
-        change_value.append(param2)
-      if change_value:
-        plugin.need_flush = change_value
+      plugin.plugin_class = plugin_class
+      plugin.plugin_lib = plugin_lib
+      plugin.plugin_params = plugin_params
+      plugin.plugin_flags = plugin_flags
     else:
-      plugin = Plugin(len(plugin_tables), plugin_dex, plugin_class, plugin_lib, param1, param2)
+      plugin = Plugin(len(plugin_tables), plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
       plugin_tables[file_path_abs] = plugin
     return plugin
 
-  def __init__(self, plugin_id, plugin_dex: str, plugin_class: str, plugin_lib: str | None, param1: str, param2):
+  def __init__(self, plugin_id, plugin_dex: str, plugin_class: str, plugin_lib: str | None, plugin_params: str,
+      plugin_flags: int):
     self.plugin_id = plugin_id
     self.plugin_dex = plugin_dex
     self.plugin_class = plugin_class
     self.plugin_lib = plugin_lib
-    self.param1 = param1
-    self.param2 = param2
+    self.plugin_params = plugin_params
+    self.plugin_flags = plugin_flags
+
+  def __repr__(self):
+    return f'<Plugin: {self.plugin_class}>'
 
 
 def clear_plugin():

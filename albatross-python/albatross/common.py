@@ -11,15 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import os
-
 import toml
-
-from .wrapper import cached_class_property
-
 import re
 import subprocess
+from .wrapper import cached_class_property
 
 OUT_TIME_CODE = 996
 FAULT_CODE = 997
@@ -61,7 +57,12 @@ class Configuration(object):
   @staticmethod
   def __make_get(name, default_value):
     def func(self):
-      return self.config.get(name, default_value)
+      res = self.config.get(name, default_value)
+      if res != default_value:
+        if type(default_value) == str:
+          if default_value[-1] == '/' and res[-1] != '/':
+            res += '/'
+      return res
 
     func.__name__ = name
     return cached_class_property(func)
@@ -141,7 +142,7 @@ class Configuration(object):
 
   app_agent_dst = __make_get('app_agent_dst', '/data/dalvik-cache/app_agent.dex')
 
-  app_injector_dir = __make_get('app_injector_dir', '/data/dalvik-cache/')
+  app_plugin_home = __make_get('app_plugin_home', '/data/dalvik-cache/')
 
   support_abi_list = __make_get('support_abi_list', ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'])
 

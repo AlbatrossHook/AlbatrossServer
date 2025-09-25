@@ -15,7 +15,7 @@
 import struct
 from enum import IntEnum, IntFlag
 
-from .rpc_client import RpcClient, byte
+from .rpc_client import RpcClient, byte, read_string
 from .rpc_client import rpc_api, broadcast_api, void, ByteEnum
 
 
@@ -72,6 +72,7 @@ class DexLoadResult(ByteEnum):
   DEX_CLASS_NO_FIND = 5
   DEX_INIT_FAIL = 6
   METHOD_NO_FIND = 7
+  DEX_SYSTEM_SERVER_ERR = 9
   DEX_LOAD_SUCCESS = 20
   DEX_ALREADY_LOAD = 21
 
@@ -80,8 +81,9 @@ class SetResult(ByteEnum):
   SET_OK = 0,
   SET_ALREADY = 1,
   NOT_EXISTS = 2
-  SYSTEM_CRASHED = 3
+  SYSTEM_SERVER_ERR = 3
   DATA_ERR = 4
+  SET_CHANGE = 5
 
 
 class AlbatrossClient(RpcClient):
@@ -127,17 +129,25 @@ class AlbatrossClient(RpcClient):
   @rpc_api
   def load_plugin(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
       agent_register_func: str, flags: AlbatrossInitFlags, plugin_dex: str, plugin_lib: str,
-      plugin_class: str, plugin_arg_str: str, plugin_arg_init: int) -> DexLoadResult:
+      plugin_class: str, plugin_params: str, plugin_flags: int) -> DexLoadResult:
     pass
 
   @rpc_api
-  def load_system_plugin(self, plugin_dex: str, plugin_lib: str, plugin_class: str, arg_str: str,
+  def load_plugin_by_id(self, pid: int, plugin_id: int) -> DexLoadResult:
+    pass
+
+  @rpc_api
+  def get_address(self, pid: int) -> str:
+    pass
+
+  @rpc_api
+  def load_system_plugin(self, plugin_dex: str, plugin_lib: str, plugin_class: str, plugin_params: str,
       arg_int: int) -> DexLoadResult:
     pass
 
   @rpc_api
-  def register_plugin(self, plugin_id: int, plugin_dex: str, plugin_lib: str, plugin_class: str, arg_str: str,
-      arg_int: int) -> SetResult:
+  def register_plugin(self, plugin_id: int, plugin_dex: str | None, plugin_lib: str | None, plugin_class: str,
+      plugin_params: str | None, arg_int: int) -> SetResult:
     pass
 
   @rpc_api
@@ -149,7 +159,7 @@ class AlbatrossClient(RpcClient):
     pass
 
   @rpc_api
-  def modify_plugin(self, plugin_id: int, plugin_class: str, arg_str: str, arg_init: int) -> byte:
+  def modify_plugin(self, plugin_id: int, plugin_class: str, plugin_params: str, plugin_flags: int) -> byte:
     pass
 
   @rpc_api
@@ -180,7 +190,12 @@ class AlbatrossClient(RpcClient):
   @rpc_api
   def set_system_server_agent(self, dex_path: str, init_class: str, server_name: str = 'system_server',
       load_flags: AlbatrossInitFlags = AlbatrossInitFlags.NONE,
-      address: str = "albatross_system_server", init_flags: int = 0) -> SetResult:
+      address: str | None = None, init_flags: int = 0) -> SetResult:
+    pass
+
+  @rpc_api
+  def load_system_plugin(self, plugin_dex: str, plugin_lib: str | None, plugin_class: str, plugin_params: str | None,
+      plugin_flags: int) -> DexLoadResult:
     pass
 
   @rpc_api
@@ -208,3 +223,28 @@ class AlbatrossClient(RpcClient):
   @rpc_api
   def is_injected(self, pid: int) -> bool:
     pass
+
+  @rpc_api
+  def uid_processes(self, uid: int, only_java: bool) -> list:
+    pass
+
+  @rpc_api
+  def unload_plugin_dex(self, pid: int, plugin_id: int) -> DexLoadResult:
+    pass
+
+  @staticmethod
+  def parse_uid_processes(data, result):
+    if result >= 0:
+      s, idx = read_string(data, 0)
+      infos = s.split(',')
+      processes = []
+      for info in infos:
+        name, pid, is_java = info.split('^_^')
+        processes.append({'name': name, 'pid': int(pid), 'is_java': int(is_java)})
+      return processes
+    else:
+      return []
+
+  def get_java_processes_by_uid(self, uid):
+    processes = self.uid_processes(uid, True)
+    return [p['pid'] for p in processes if p['is_java']]

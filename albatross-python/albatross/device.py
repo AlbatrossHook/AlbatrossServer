@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 
-from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA
+from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA, SetResult
 from .common import Configuration, run_shell
 from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled
 from .plugin import Plugin
@@ -231,9 +231,10 @@ class AlbatrossDevice(object):
     su_file = self.shell('which su')
     if su_file:
       return su_file
-    for i in ['/sbin/su']:
-      ret = self.shell('ls ' + i)
-      if self.ret_code == 0:
+    for i in ["/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/su", "/system/bin/.ext/su",
+      "/system/usr/we-need-root/su", "/data/local/xbin/su", "/data/local/bin/su", "/data/local/su"]:
+      ret_code, _ = run_shell(self.shellcmd + 'ls ' + i)
+      if ret_code == 0:
         return i
     return 'su'
 
@@ -251,9 +252,9 @@ class AlbatrossDevice(object):
 
   @cached_property
   def agent_dex(self):
-    injector_dir = Configuration.app_injector_dir
+    injector_dir = Configuration.app_plugin_home
     dst = injector_dir + "app_agent.dex"
-    res = self.push_file(Configuration.app_agent_file, dst, mode='444')
+    res = self.push_file(Configuration.app_agent_file, dst, mode='444', check=True)
     if res:
       oat_dir = injector_dir + 'oat/' + self.abi_lib_name
       self.root_shell('mkdir -p ' + oat_dir)
@@ -374,7 +375,7 @@ class AlbatrossDevice(object):
     device_abi = self.cpu_abi
     server_file, abi_lib, abi_lib32 = Configuration.get_server_path(device_abi)
     assert os.path.exists(server_file)
-    update = self.push_file(server_file, server_dst_path, mode='500')
+    update = self.push_file(server_file, server_dst_path, check=True, mode='500')
     self.shell('chown root:root ' + server_dst_path)
     lib_dst = Configuration.lib_path + self.abi_lib_name + '/'
     update += self.push_file(abi_lib, lib_dst)
@@ -402,6 +403,8 @@ class AlbatrossDevice(object):
       cmd_prefix = "nohup su -c "
     else:
       cmd_prefix = "nohup "
+    if type(server_port) == str and server_port.startswith('localabstract:'):
+      server_port = server_port.split(':')[1]
     cmd = f'{self.shellcmd} "LD_LIBRARY_PATH={lib_dst} {cmd_prefix} {server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"'
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     time.sleep(2)
@@ -436,9 +439,11 @@ class AlbatrossDevice(object):
       if not client.reconnect():
         cached_property.delete(self, "system_server_client")
 
+  system_server_address = None
+
   @cached_property
   def system_server_subscriber(self) -> SystemServerClient:
-    port = self.get_forward_port(Configuration.system_server_address)
+    port = self.get_forward_port(self.system_server_address)
     subscribe_client = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
     subscribe_client.set_on_close_listener(self.on_system_subscribe_close)
     subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
@@ -470,12 +475,15 @@ class AlbatrossDevice(object):
     res = client.inject_albatross(server_pid, SystemServerClient.inject_flags, '')
     if res < 0:
       return cached_property.nil_value
-    unix_address = Configuration.system_server_listen_address
+    # unix_address = Configuration.system_server_listen_address
     res = client.load_dex(server_pid, agent_dst, None, Configuration.albatross_class_name,
       Configuration.system_server_init_class, Configuration.albatross_register_func,
-      SystemServerClient.albatross_init_flags, unix_address, 0, timeout=30)
+      SystemServerClient.albatross_init_flags, None, 0, timeout=30)
     if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
-      port = self.get_forward_port(Configuration.system_server_address)
+      system_server_address = client.get_address(server_pid)
+      system_server_address = 'localabstract:' + system_server_address
+      self.system_server_address = system_server_address
+      port = self.get_forward_port(system_server_address)
       system_server = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
       system_server.init()
       system_server.set_on_close_listener(self.on_system_client_close)
@@ -493,6 +501,10 @@ class AlbatrossDevice(object):
     client = self.get_client()
     client.set_on_close_listener(self.__on_close)
     return client
+
+  def clear_plugins(self):
+    assert self.init_plugin_env
+    return self.client.clear_plugins()
 
   @cached_property
   def is_64(self):
@@ -534,21 +546,20 @@ class AlbatrossDevice(object):
         return 0
     return 1
 
-  def launch(self, target_package, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None, arg_int: int = 0):
+  def launch(self, target_package, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
+      plugin_flags: int = 0):
     if not self.is_app_install(target_package):
       raise PackageNotInstalled(target_package)
     launch_callback = self.process_launch_callback
     clear_history_launch = Configuration.clear_history_launch
     if clear_history_launch:
       launch_callback.clear()
-      self.client.clear_plugins()
-    assert os.path.exists(plugin_dex)
     server_client = self.system_server_client
     assert server_client.init_intercept() != 0
     server_client.force_stop_app(target_package)
     app_id = server_client.set_intercept_app(target_package, clear_history_launch)
     assert self.system_server_subscriber
-    launch_callback[app_id] = (plugin_dex, plugin_lib, plugin_class, arg_str, arg_int)
+    launch_callback[app_id] = (plugin_dex, plugin_lib, plugin_class, plugin_params, plugin_flags)
     self.app_launch_count[app_id] = 0
     server_client.start_activity(target_package, None, 0)
 
@@ -567,55 +578,151 @@ class AlbatrossDevice(object):
           self.restart_system_server()
           time.sleep(20)
       client.set_system_server_agent(agent_dst, Configuration.system_server_init_class, "system_server",
-        AlbatrossInitFlags.NONE, Configuration.system_server_listen_address, 3)
+        AlbatrossInitFlags.NONE, None, 3)
       client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
-        Configuration.albatross_agent_class, Configuration.albatross_register_func, AlbatrossInitFlags.NONE)
+        Configuration.albatross_agent_class, Configuration.albatross_register_func, AlbatrossInitFlags.FLAG_CALL_CHAIN)
+      if not client.patch_selinux():
+        self.setenforce(False)
       return True
-    except:
+    except Exception as e:
+      print('init plugin env fail:' + str(e))
       return cached_property.nil_value
 
-  def launch_fast(self, target_package, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None,
-      arg_int: int = 0):
+  def launch_fast(self, target_package, plugin_dex, plugin_class, plugin_params: str = None,
+      plugin_flags: int = 0, plugin_lib=None):
     uid = self.get_package_uid(target_package)
     if not uid:
       return False
     if not self.init_plugin_env:
       return False
     client = self.client
-    assert os.path.exists(plugin_dex)
-    plugin_dex_device = Configuration.app_injector_dir + os.path.basename(plugin_dex)
+    plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
     self.push_file(plugin_dex, plugin_dex_device, mode='444')
-    plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, arg_str, arg_int)
-    if not plugin.is_register:
-      client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, arg_str, arg_int)
-      plugin.is_register = True
-    elif plugin.need_flush:
-      client.modify_plugin(plugin.plugin_id, plugin_class, arg_str, arg_int)
-      plugin.need_flush = False
+    plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
+    client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
     client.add_plugin_rule(plugin.plugin_id, uid)
     self.stop_app(target_package)
     self.start_app(target_package)
     return True
 
-  def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, arg_str: str = None, arg_int: int = 0,
-      init_flags=AlbatrossInitFlags.NONE):
+  def launch_with_plugins(self, target_package, plugins):
+    uid = self.get_package_uid(target_package)
+    if not uid:
+      return False
+    client = self.client
+    for plugin in plugins:
+      res = client.add_plugin_rule(plugin.plugin_id, uid)
+      if res not in [SetResult.SET_OK, SetResult.SET_ALREADY]:
+        return False
+    self.start_app(target_package)
+    return True
+
+  def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.NONE):
+    client = self.client
     if isinstance(package_or_pid, str):
-      pids = self.pidof(package_or_pid)
+      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
+    else:
+      pids = [package_or_pid]
+    success = []
+    if pids and plugins:
+      agent_dex = self.agent_dex
+      for pid in pids:
+        res = client.inject_albatross(pid, self.app_inject_flags, None)
+        if res >= 0:
+          for plugin in plugins:
+            res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
+              Configuration.albatross_agent_class, Configuration.albatross_register_func,
+              init_flags, plugin.dex_device_dst, plugin.plugin_lib, plugin.plugin_class, plugin.plugin_params,
+              plugin.plugin_flags)
+            if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
+              success.append((pid, plugin))
+    return success
+
+  def attach_with_plugin_ids(self, package_or_pid, plugins):
+    assert self.init_plugin_env
+    client = self.client
+    if isinstance(package_or_pid, str):
+      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
+    else:
+      pids = [package_or_pid]
+    success = []
+    for pid in pids:
+      res = client.inject_albatross(pid, self.app_inject_flags, None)
+      if res >= 0:
+        for plugin in plugins:
+          res = client.load_plugin_by_id(pid, plugin.plugin_id)
+          if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
+            success.append((pid, plugin))
+    return success
+
+  def register_plugin(self, plugin_dex, plugin_class, plugin_params: str = None,
+      plugin_flags: int = 0, plugin_lib=None):
+    assert os.path.exists(plugin_dex)
+    client = self.client
+    plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
+    self.push_file(plugin_dex, plugin_dex_device, mode='444')
+    plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
+    client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
+    plugin.dex_device_dst = plugin_dex_device
+    return plugin
+
+  def reload_plugin(self, plugin: Plugin):
+    assert self.init_plugin_env
+    if not plugin.dex_device_dst:
+      plugin_dex = plugin.plugin_dex
+      plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
+      self.push_file(plugin_dex, plugin_dex_device, mode='444')
+      plugin.dex_device_dst = plugin_dex_device
+    self.client.register_plugin(plugin.plugin_id, plugin.dex_device_dst, None, plugin.plugin_class,
+      plugin.plugin_params, plugin.plugin_flags)
+
+  def remove_plugin(self, plugin: Plugin):
+    self.client.delete_plugin(plugin.plugin_id)
+
+  def load_system_plugin(self, plugin_dex, plugin_class, plugin_params: str = None, plugin_flags: int = 0,
+      plugin_lib: str | None = None):
+    assert os.path.exists(plugin_dex)
+    assert self.init_plugin_env
+    client = self.client
+    plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
+    self.push_file(plugin_dex, plugin_dex_device, mode='444')
+    if plugin_lib:
+      assert os.path.exists(plugin_lib)
+      pid = client.get_process_pid('system_server')
+      if client.get_process_isa(pid) in [RunTimeISA.ISA_X86_64, RunTimeISA.ISA_ARM64]:
+        lib_dst_device = self.lib_dir + os.path.basename(plugin_lib)
+      else:
+        lib_dst_device = self.lib32_dir + os.path.basename(plugin_lib)
+      self.push_file(plugin_lib, lib_dst_device)
+      plugin_lib = lib_dst_device
+    res = client.load_system_plugin(plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
+    return res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]
+
+  def add_plugin_rule(self, plugin: Plugin, target_package):
+    assert self.init_plugin_env
+    uid = self.get_package_uid(target_package)
+    client = self.client
+    client.add_plugin_rule(plugin.plugin_id, uid)
+
+  def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
+      plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE):
+    client = self.client
+    if isinstance(package_or_pid, str):
+      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
     else:
       pids = [package_or_pid]
     success = []
     if pids:
       assert os.path.exists(plugin_dex)
-      client = self.client
-      plugin_dex_device = Configuration.app_injector_dir + os.path.basename(plugin_dex)
+      plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
       self.push_file(plugin_dex, plugin_dex_device, mode='444')
       for pid in pids:
-        pid_int = int(pid)
-        res = client.inject_albatross(pid_int, self.app_inject_flags, None)
+        # pid_int = int(pid)
+        res = client.inject_albatross(pid, self.app_inject_flags, None)
         if res >= 0:
           if plugin_lib:
             assert os.path.exists(plugin_lib)
-            if client.get_process_isa(pid_int) in [RunTimeISA.ISA_X86_64, RunTimeISA.ISA_ARM64]:
+            if client.get_process_isa(pid) in [RunTimeISA.ISA_X86_64, RunTimeISA.ISA_ARM64]:
               lib_dst_device = self.lib_dir + os.path.basename(plugin_lib)
             else:
               lib_dst_device = self.lib32_dir + os.path.basename(plugin_lib)
@@ -623,12 +730,12 @@ class AlbatrossDevice(object):
           else:
             lib_dst_device = None
           agent_dex = self.agent_dex
-          res = client.load_plugin(pid_int, agent_dex, None, Configuration.albatross_class_name,
+          res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
             Configuration.albatross_agent_class, Configuration.albatross_register_func,
-            init_flags, plugin_dex_device, lib_dst_device, plugin_class, arg_str,
-            arg_int)
+            init_flags, plugin_dex_device, lib_dst_device, plugin_class, plugin_params,
+            plugin_flags)
           if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
-            success.append(pid_int)
+            success.append(pid)
     return success
 
   def get_forward_port(self, remote_port, not_check=True):
@@ -643,6 +750,11 @@ class AlbatrossDevice(object):
       local_port = get_valid_port()
       self.forward(local_port, remote_port)
     return local_port
+
+  def remove_forward_port(self, port):
+    if isinstance(port, int):
+      port = 'tcp:' + str(port)
+    run_shell(self.cmd + 'forward --remove ' + port)
 
   def get_app_main_activities(self, pkg):
     cmd = self.shellcmd + " dumpsys package " + pkg
@@ -743,15 +855,108 @@ class AlbatrossDevice(object):
     return self.pull_file("/sdcard/screen.png", path)
 
   def get_package_uid(self, pkg):
-    cmd = self.shellcmd + '"dumpsys package ' + pkg + '| grep userId"'
+    cmd = self.shellcmd + 'dumpsys package ' + pkg
     ret_str = run_shell(cmd)[1].decode("utf-8")
-    if not ret_str:
-      cmd = self.shellcmd + '"dumpsys package ' + pkg + '| grep uid"'
-      ret_str = run_shell(cmd)[1].decode("utf-8")
-    return int(ret_str.split("=")[1].split(maxsplit=1)[0].strip())
+    res = re.findall(r'\s+(?:appId|uid|userId)=(\d+)', ret_str)
+    if res:
+      return int(res[0])
+    return None
 
   def __repr__(self):
     return "Device: {}".format(self.device_id)
+
+  def get_processes_by_uid(self, target_uid: int, save_name=False):
+    output = self.shell("ps -A -o USER,UID,PID,NAME")
+    if not output:
+      return []
+    processes = []
+    uid_str = str(target_uid)
+    for line in output.splitlines():
+      if not line.strip():
+        continue
+      match = re.match(r'^\s*(\S+)\s+(\d+)\s+(\d+)\s+(\S+)\s*$', line)
+      if match:
+        user, uid, pid, name = match.groups()
+        if uid == uid_str:
+          if save_name:
+            processes.append({'pid': int(pid), 'name': name})
+          else:
+            processes.append(pid)
+    return processes
+
+  def watch_plugin(_self, target_pkg: str, plugin: Plugin, change_restart=False, attach=False):
+    from watchdog.events import FileSystemEventHandler
+    target_uid = _self.get_package_uid(target_pkg)
+    _self.reload_plugin(plugin)
+
+    plugin_dex = plugin.plugin_dex
+    if not attach:
+      _self.add_plugin_rule(plugin, target_pkg)
+
+    class FileChangeHandler(FileSystemEventHandler):
+
+      def __init__(self):
+        self.debounce_delay = 0.5  # 防抖延迟（秒）
+        self.plugin_md5 = file_md5(plugin_dex)
+        self.last_processed = 0
+
+      def handle_plugin_change(self):
+        try:
+          new_md5 = file_md5(plugin_dex)
+          if new_md5 == self.plugin_md5:
+            return
+          current_time = time.time()
+          # 防抖处理
+          if current_time - self.last_processed < self.debounce_delay:
+            return
+          self.last_processed = current_time
+          self.plugin_md5 = new_md5
+          _self.push_file(plugin_dex, plugin.dex_device_dst, mode='444', check=True)
+          if change_restart:
+            _self.stop_app(target_pkg)
+            _self.start_app(target_pkg)
+            if attach:
+              time.sleep(10)
+              pids = _self.client.get_java_processes_by_uid(target_uid)
+              _self.attach_with_plugin_ids(pids, [plugin])
+          else:
+            pids = _self.client.get_java_processes_by_uid(target_uid)
+            if not pids:
+              _self.start_app(target_pkg)
+              time.sleep(10)
+              pids = _self.client.get_java_processes_by_uid(target_uid)
+            for pid in pids:
+              _self.client.unload_plugin_dex(pid, plugin.plugin_id)
+              _self.client.load_plugin_by_id(pid, plugin.plugin_id)
+
+        except Exception as e:
+          print(f"\n更新插件失败: {str(e)}", file=sys.stderr)
+
+      def on_modified(self, event):
+        """处理文件修改事件"""
+        if not event.is_directory and event.src_path == os.path.abspath(plugin_dex):
+          self.handle_plugin_change()
+
+      def on_created(self, event):
+        """处理文件创建事件（针对文件被删除后重新创建的情况）"""
+        if not event.is_directory and event.src_path == os.path.abspath(plugin_dex):
+          print("检测到版本文件重新创建")
+          self.handle_plugin_change()
+
+    event_handler = FileChangeHandler()
+    from watchdog.observers import Observer
+    observer = Observer()
+    observer.schedule(event_handler, plugin_dex, recursive=False)
+    observer.start()
+    print(f"开始监控插件: {Observer} ")
+    print("按Ctrl+C停止监控")
+    try:
+      while True:
+        time.sleep(5)
+    except KeyboardInterrupt:
+      observer.stop()
+      print("\n监控已停止")
+    observer.join()
 
 
 class DeviceManager:
@@ -808,13 +1013,15 @@ def destroy_device():
       device.reconnect = False
       system_server_subscriber = cached_property.pop(device, 'system_server_subscriber')
       if system_server_subscriber != cached_property.nil_value:
-        system_server_subscriber.shutdown()
+        system_server_subscriber.close()
       system_server_client = cached_property.pop(device, 'system_server_client')
       if system_server_client is not cached_property.nil_value:
         system_server_client.close()
+        device.remove_forward_port(system_server_client.port)
       client = cached_property.pop(device, 'client')
       if client is not cached_property.nil_value:
         client.close()
+        device.remove_forward_port(client.port)
     devices.clear()
 
     _device_manager = None
