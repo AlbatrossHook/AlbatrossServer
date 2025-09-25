@@ -80,8 +80,6 @@ public class SystemServerInjectEntry extends UnixRpcInstance implements SystemSe
       if (Albatross.loadLibrary(libpath, flags & 0xffff))
         Albatross.initRpcClass(UnixRpcServer.class);
       SystemServerInjectEntry server = SystemServerInjectEntry.v();
-      if (p1 == null)
-        p1 = "albatross_system_server";
       UnixRpcServer unixRpcServer = server.createServer(p1, true);
       if (unixRpcServer != null) {
         server.context = Albatross.currentApplication();
@@ -410,6 +408,10 @@ public class SystemServerInjectEntry extends UnixRpcInstance implements SystemSe
       return 0;
     }
     return 1;
+  }
+
+  public static boolean disablePlugin(String pluginDexPath, String pluginClassName) {
+    return DynamicPluginManager.getInstance().disablePlugin(pluginDexPath, pluginClassName);
   }
 
 

@@ -7,9 +7,15 @@ import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 
 public class DemoPlugin extends AlbatrossPlugin {
+
+  public static String prefix = "activity";
+
   public DemoPlugin(String libName, String argString, int flags) {
     super(libName, argString, flags);
+    plugin = this;
   }
+
+  static DemoPlugin plugin;
 
   @Override
   public void beforeMakeApplication() {
@@ -20,6 +26,13 @@ public class DemoPlugin extends AlbatrossPlugin {
   public boolean load() {
     Albatross.log("DemoPlugin load");
     return super.load();
+  }
+
+  @Override
+  public boolean parseParams(String params, int flags) {
+    if (params != null && !params.isEmpty())
+      prefix = params;
+    return true;
   }
 
   @Override

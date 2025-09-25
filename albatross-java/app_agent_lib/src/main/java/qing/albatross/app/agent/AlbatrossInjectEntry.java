@@ -15,6 +15,7 @@
  */
 package qing.albatross.app.agent;
 
+import android.annotation.SuppressLint;
 import android.app.Application;
 import android.app.Instrumentation;
 
@@ -30,17 +31,36 @@ import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
+import qing.albatross.server.UnixRpcInstance;
+import qing.albatross.server.UnixRpcServer;
 
-public class AlbatrossInjectEntry {
+public class AlbatrossInjectEntry extends UnixRpcInstance implements AppApi {
 
-
-  public static boolean loadLibrary(int flags, String dexPath, String dexLib, String className, String argString, int argInt) {
-    Albatross.log("AlbatrossInjectEntry.loadLibrary");
-    return appendPlugin(dexPath, dexLib, className, argString, argInt) == 0;
+  public static AlbatrossInjectEntry v() {
+    return SingletonHolder.instance;
   }
 
-  public static int appendPlugin(String dexPath, String dexLib, String className, String argString, int argInt) {
-    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(dexPath, dexLib, className, argString, argInt);
+  private AlbatrossInjectEntry() {
+  }
+
+  static class SingletonHolder {
+    @SuppressLint("StaticFieldLeak")
+    static AlbatrossInjectEntry instance = new AlbatrossInjectEntry();
+  }
+
+
+  public static boolean loadLibrary(int flags, String dexPath, String dexLib, String className, String pluginParams, int pluginFlags) {
+    Albatross.log("AlbatrossInjectEntry.loadLibrary");
+    Albatross.initRpcClass(UnixRpcServer.class);
+    UnixRpcServer unixRpcServer = AlbatrossInjectEntry.v().createServer(null, true);
+    if (unixRpcServer == null) {
+      Albatross.log("create server fail");
+    }
+    return appendPlugin(dexPath, dexLib, className, pluginParams, pluginFlags) == 0;
+  }
+
+  public static int appendPlugin(String dexPath, String dexLib, String className, String pluginParams, int pluginFlags) {
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(dexPath, dexLib, className, pluginParams, pluginFlags);
     if (plugin == null)
       return 1;
     Application application = Albatross.currentApplication();
@@ -55,7 +75,30 @@ public class AlbatrossInjectEntry {
     return 0;
   }
 
+  public static boolean disablePlugin(String pluginDexPath, String pluginClassName) {
+    return DynamicPluginManager.getInstance().disablePlugin(pluginDexPath, pluginClassName);
+  }
+
+  public static boolean unloadPluginDex(String pluginDexPath) {
+    return DynamicPluginManager.getInstance().unloadPluginDex(pluginDexPath);
+  }
+
+
   static boolean isApplicationOnCreateCalled = false;
+
+  @Override
+  public String getPackageName() {
+    Application application = Albatross.currentApplication();
+    if (application != null) {
+      return application.getPackageName();
+    }
+    return null;
+  }
+
+  @Override
+  protected Class<?> getApi() {
+    return AppApi.class;
+  }
 
   @TargetClass
   static class InstrumentationHook {
@@ -68,12 +111,12 @@ public class AlbatrossInjectEntry {
       if (!isApplicationOnCreateCalled) {
         isApplicationOnCreateCalled = true;
         Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
-        for (AlbatrossPlugin injector : pluginTable.values()) {
-          injector.beforeApplicationCreate(app);
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          plugin.beforeApplicationCreate(app);
         }
         callApplicationOnCreate(instrumentation, app);
-        for (AlbatrossPlugin injector : pluginTable.values()) {
-          injector.afterApplicationCreate(app);
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          plugin.afterApplicationCreate(app);
         }
       } else {
         callApplicationOnCreate(instrumentation, app);

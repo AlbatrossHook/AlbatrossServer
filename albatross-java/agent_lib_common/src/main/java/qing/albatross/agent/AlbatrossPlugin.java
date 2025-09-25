@@ -21,13 +21,14 @@ import qing.albatross.core.Albatross;
 
 public abstract class AlbatrossPlugin {
 
-  String argString;
-  int flags;
+  protected String params;
+  protected int flags;
   String libName;
+  protected boolean enable;
 
 
-  public AlbatrossPlugin(String libName, String argString, int flags) {
-    this.argString = argString;
+  public AlbatrossPlugin(String libName, String params, int flags) {
+    this.params = params;
     this.flags = flags;
     this.libName = libName;
   }
@@ -36,8 +37,10 @@ public abstract class AlbatrossPlugin {
     try {
       if (libName != null)
         System.loadLibrary(libName);
-      return true;
+      this.enable = true;
+      return parseParams(params, flags);
     } catch (Throwable e) {
+      this.enable = false;
       Albatross.log("plugin load err", e);
       return false;
     }
@@ -48,7 +51,40 @@ public abstract class AlbatrossPlugin {
   public void beforeMakeApplication() {
   }
 
+  public boolean parseParams(String params, int flags) {
+    return true;
+  }
+
   public void onAttachSystem(Application application) {
+  }
+
+  public void onConfigChange(String config, int flags) {
+    this.params = config;
+    this.flags = flags;
+    if (this.enable)
+      parseParams(config, flags);
+  }
+
+  public void unload() {
+    disable();
+  }
+
+  public void disable() {
+    this.enable = false;
+    Albatross.log("plugin " + this.getClass().getName() + " disable");
+    parseParams(null, 0);
+  }
+
+  public void enable() {
+    this.enable = true;
+    parseParams(params, flags);
+  }
+
+  public boolean isEnable() {
+    return this.enable;
+  }
+
+  public static void send(String tag, String msg) {
   }
 
 

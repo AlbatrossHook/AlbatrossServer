@@ -13,9 +13,9 @@ public class PluginActivity extends Activity {
     textView.setText("demo plugin1");
     setContentView(textView);
     Intent resultIntent = new Intent();
-    resultIntent.putExtra("config_param1", "demo_param");
-    resultIntent.putExtra("config_param2", 12345);
-    resultIntent.putExtra("injector", this.getClass().getName().replace("PluginActivity", "DemoInjector"));
+    resultIntent.putExtra("plugin_params", "demo_param");
+    resultIntent.putExtra("plugin_flags", 12345);
+    resultIntent.putExtra("plugin_class", this.getClass().getName().replace("PluginActivity", "DemoPlugin"));
     setResult(RESULT_OK, resultIntent);
   }
 }

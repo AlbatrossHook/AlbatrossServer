@@ -16,7 +16,7 @@
 
         <meta-data
             android:name="plugin_description"
-            android:value="this is a demo plugin" />
+            android:value="this is a demo plugin,toast activity classname when app top activity is showe" />
 
         <meta-data
             android:name="plugin_author"

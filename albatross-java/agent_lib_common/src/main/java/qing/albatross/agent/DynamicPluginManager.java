@@ -16,8 +16,11 @@
 package qing.albatross.agent;
 
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import dalvik.system.DexClassLoader;
 import qing.albatross.core.Albatross;
@@ -36,7 +39,6 @@ public class DynamicPluginManager {
     return Holder.INSTANCE;
   }
 
-  // 使用Holder模式实现线程安全的单例
   private static class Holder {
     static final DynamicPluginManager INSTANCE = new DynamicPluginManager();
   }
@@ -52,6 +54,65 @@ public class DynamicPluginManager {
   }
 
 
+  public boolean modifyPluginConfig(AlbatrossPlugin plugin, String config, int flags) {
+    if (plugin != null) {
+      if (flags != plugin.flags || !Objects.equals(config, plugin.params)) {
+        plugin.onConfigChange(config, flags);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public boolean unloadPlugin(String pluginDexPath, String pluginClassName) {
+    String pluginKey = generatePluginKey(pluginDexPath, pluginClassName);
+    AlbatrossPlugin plugin = pluginCache.get(pluginKey);
+    if (plugin != null) {
+      plugin.unload();
+      return true;
+    }
+    return false;
+  }
+
+  public boolean disablePlugin(String pluginDexPath, String pluginClassName) {
+    String pluginKey = generatePluginKey(pluginDexPath, pluginClassName);
+    AlbatrossPlugin plugin = pluginCache.get(pluginKey);
+    if (plugin != null) {
+      plugin.disable();
+      return true;
+    }
+    return false;
+  }
+
+  public boolean unloadPluginDex(String pluginDexPath) {
+    DexClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
+    if (dexClassLoader != null) {
+      classLoaderCache.remove(pluginDexPath);
+      List<String> toRemoved = new ArrayList<>();
+      for (Map.Entry<String, AlbatrossPlugin> entry : pluginCache.entrySet()) {
+        if (entry.getKey().startsWith(pluginDexPath)) {
+          toRemoved.add(entry.getKey());
+          entry.getValue().unload();
+        }
+      }
+      for (String key : toRemoved) {
+        pluginCache.remove(key);
+      }
+      return true;
+    }
+    return false;
+  }
+
+
+  public static boolean unload(String pluginDexPath, String pluginClassName) {
+    return getInstance().unloadPlugin(pluginDexPath, pluginClassName);
+  }
+
+  public static boolean disable(String pluginDexPath, String pluginClassName) {
+    return getInstance().disablePlugin(pluginDexPath, pluginClassName);
+  }
+
+
   /**
    * 加载并添加新插件
    *
@@ -59,17 +120,19 @@ public class DynamicPluginManager {
    * @param nativeLibPath   本地库路径(可选)
    * @param pluginClassName 插件主类名
    * @param arguments       字符串参数
-   * @param flag            整型标志参数
+   * @param flags           整型标志参数
    * @return 加载成功的插件实例，如果已存在或加载失败则返回null
    */
   public AlbatrossPlugin appendPlugin(String pluginDexPath,
                                       String nativeLibPath,
                                       String pluginClassName,
                                       String arguments,
-                                      int flag) {
+                                      int flags) {
     String pluginKey = generatePluginKey(pluginDexPath, pluginClassName);
-
-    if (pluginCache.containsKey(pluginKey)) {
+    AlbatrossPlugin plugin = pluginCache.get(pluginKey);
+    if (plugin != null) {
+      plugin.enable = true;
+      modifyPluginConfig(plugin, arguments, flags);
       return null;
     }
     DexClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
@@ -87,12 +150,11 @@ public class DynamicPluginManager {
       dexClassLoader = new DexClassLoader(pluginDexPath, null, libDir, DynamicPluginManager.class.getClassLoader());
       classLoaderCache.put(pluginDexPath, dexClassLoader);
     }
-    AlbatrossPlugin plugin;
     try {
       Class<AlbatrossPlugin> initClass = (Class<AlbatrossPlugin>) dexClassLoader.loadClass(pluginClassName);
       Constructor<AlbatrossPlugin> constructor = initClass.getDeclaredConstructor(String.class, String.class, int.class);
       constructor.setAccessible(true);
-      plugin = constructor.newInstance(libName, arguments, flag);
+      plugin = constructor.newInstance(libName, arguments, flags);
       pluginCache.put(pluginKey, plugin);
       return plugin;
     } catch (Throwable e) {
