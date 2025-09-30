@@ -1,5 +1,7 @@
 # AlbatrossServer
 
+[中文](README_CN.md)
+
 **AlbatrossServer** is a powerful Android instrumentation framework designed for dynamic code injection, runtime hooking, and real-time monitoring of Android applications. It enables researchers and developers to inject custom logic into target apps via RPC control, allowing fine-grained manipulation and analysis of application behavior at runtime.
 
 > ⚠️ **Disclaimer**: This tool is intended **solely** for security research, testing, learning, and educational purposes. **Any unauthorized use, including but not limited to software cracking, piracy, or malicious activities, is strictly prohibited.** The developers assume no liability for misuse.
@@ -51,10 +53,12 @@ Contains essential runtime assets required for injection:
 ## Core Concepts
 
 ### Plugin Development
-All plugins must extend the `AlbatrossInjector` class and override lifecycle methods:
+All plugins must extend the `AlbatrossPlugin` class and override lifecycle methods:
+
+> **Plugin Development Reference**: https://github.com/AlbatrossHook/HideApp
 
 ```java
-public class DemoInjector extends AlbatrossInjector {
+public class DemoInjector extends AlbatrossPlugin {
     public DemoInjector(String libName, String argString, int flags) {
         super(libName, argString, flags);
     }
@@ -197,6 +201,14 @@ print('Test completed.')
 > You must have **explicit authorization** before testing on any system or application.  
 > Unauthorized access or modification of software may violate laws and regulations.  
 > **Do not use this tool for illegal or unethical purposes.**
+
+---
+
+## Community
+
+**QQ Group**: 478564202
+
+Join our community to discuss mobile security, reverse engineering, risk control, and related topics!
 
 ---
 
