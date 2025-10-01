@@ -1,3 +1,8 @@
+version 2.0.2:
+ - rpc improve.
+ - Add annotations to the rpc method.
+ - AlbatrossServerApi is added.
+
 version 2.0.1:
  - Support monitoring local changes in the plugin. If recompiled, re-inject.
  - optimize attach by obtain all java processes of the app based on uid.

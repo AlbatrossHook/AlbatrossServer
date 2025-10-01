@@ -15,7 +15,7 @@
 from typing import Optional
 from . import device
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 
 def get_device(device_id: Optional[str] = None) -> device.AlbatrossDevice:
