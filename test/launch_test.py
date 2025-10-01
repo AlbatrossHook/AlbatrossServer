@@ -26,7 +26,7 @@ def main(device_id=None):
     for pid in pids:
       address = client.get_address(pid)
       port = device.get_forward_port('localabstract:' + address)
-      app_client = AppClient(port, pkg + ":" + str(pid))
+      app_client = AppClient(None, port, pkg + ":" + str(pid))
       target_uid = app_client.getuid()
       assert uid == target_uid
       target_pkg = app_client.get_package_name()
@@ -38,4 +38,7 @@ def main(device_id=None):
 
 
 if __name__ == '__main__':
-  main()
+  if len(sys.argv) > 1:
+    main(sys.argv[1])
+  else:
+    main()
