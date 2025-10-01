@@ -15,6 +15,8 @@
  */
 package qing.albatross.android.system_server;
 
+import static qing.albatross.agent.Const.FLAG_LOG;
+
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.app.Application;
@@ -34,6 +36,7 @@ import java.util.Map;
 
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.agent.DynamicPluginManager;
+import qing.albatross.agent.PluginMessage;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.JsonFormatter;
@@ -41,7 +44,7 @@ import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
 
 
-public class SystemServerInjectEntry extends UnixRpcInstance implements SystemServerApi {
+public class SystemServerInjectAgent extends UnixRpcInstance implements SystemServerApi {
 
   static Map<Integer, String> interceptApps = new HashMap<>();
   static boolean interceptAll = false;
@@ -64,25 +67,34 @@ public class SystemServerInjectEntry extends UnixRpcInstance implements SystemSe
 
   static class SingletonHolder {
     @SuppressLint("StaticFieldLeak")
-    static SystemServerInjectEntry instance = new SystemServerInjectEntry();
+    static SystemServerInjectAgent instance = new SystemServerInjectAgent();
   }
 
 
-  public static SystemServerInjectEntry v() {
+  public static SystemServerInjectAgent v() {
     return SingletonHolder.instance;
   }
 
-  private SystemServerInjectEntry() {
+  private SystemServerInjectAgent() {
   }
 
-  public static boolean loadLibrary(String libpath, int flags, String p1, int p2) {
+  public static boolean loadLibrary(String libpath, int albatrossInitFlags, String p1, int p2) {
     try {
-      if (Albatross.loadLibrary(libpath, flags & 0xffff))
+      if (Albatross.loadLibrary(libpath, albatrossInitFlags & 0xffff))
         Albatross.initRpcClass(UnixRpcServer.class);
-      SystemServerInjectEntry server = SystemServerInjectEntry.v();
+      SystemServerInjectAgent server = SystemServerInjectAgent.v();
       UnixRpcServer unixRpcServer = server.createServer(p1, true);
       if (unixRpcServer != null) {
         server.context = Albatross.currentApplication();
+        if ((albatrossInitFlags & FLAG_LOG) != 0) {
+          try {
+            PluginMessage.setMessageSender(server);
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+        } else {
+          PluginMessage.enableMessage();
+        }
         if ((p2 & 1) != 0) {
           if (!server.init())
             return false;

@@ -16,14 +16,11 @@
 
         <meta-data
             android:name="plugin_description"
-            android:value="this is a demo plugin,toast activity classname when app top activity is showe" />
+            android:value="this is a demo plugin,toast activity classname when app top activity is showed" />
 
         <meta-data
             android:name="plugin_author"
             android:value="QingWan" />
-        <!--        <meta-data-->
-        <!--            android:name="plugin_support"-->
-        <!--            android:value="app" />-->
 
         <activity
             android:name="qing.albatross.plugin.app.PluginActivity"

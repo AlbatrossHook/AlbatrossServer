@@ -38,9 +38,11 @@ dependencies {
     if (useSourceModules) {
         implementation(project(":annotation"))
         implementation(project(":core"))
+        implementation(project(":server"))
     } else {
         implementation("qing.albatross:annotation-release:1.0@aar")
         implementation("qing.albatross:core-release:1.0@aar")
+        implementation("qing.albatross:server-release:1.0@aar")
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
 }

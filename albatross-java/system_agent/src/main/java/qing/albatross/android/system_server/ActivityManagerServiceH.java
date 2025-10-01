@@ -15,7 +15,7 @@
  */
 package qing.albatross.android.system_server;
 
-import static qing.albatross.android.system_server.SystemServerInjectEntry.shouldInterceptUid;
+import static qing.albatross.android.system_server.SystemServerInjectAgent.shouldInterceptUid;
 
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
@@ -23,13 +23,14 @@ import android.util.SparseArray;
 
 import org.json.JSONObject;
 
+import qing.albatross.annotation.ExecOption;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
 import qing.albatross.core.Albatross;
 import qing.albatross.reflection.FieldDef;
 
-@TargetClass(className = "com.android.server.am.ActivityManagerService")
+@TargetClass(className = "com.android.server.am.ActivityManagerService", hookerExec = ExecOption.DO_NOTHING)
 public class ActivityManagerServiceH {
 
 
@@ -62,7 +63,7 @@ public class ActivityManagerServiceH {
   }
 
   private static void interceptCheck(Object ams, int pid, int callingUid) {
-    if (shouldInterceptUid(callingUid)) {
+    if (shouldInterceptUid(callingUid) && SystemServerInjectAgent.v().getSubscriberSize() > 0) {
       try {
         JSONObject jsonObject = new JSONObject();
         Object pids = mPidsSelfLocked.get(ams);
@@ -94,7 +95,7 @@ public class ActivityManagerServiceH {
           jsonObject.put("type", componentType);
           jsonObject.put("name", name);
         }
-        SystemServerInjectEntry.v().notifyProcessLaunch(callingUid, pid, jsonObject.toString());
+        SystemServerInjectAgent.v().notifyProcessLaunch(callingUid, pid, jsonObject.toString());
       } catch (Exception e) {
         Albatross.log("interceptCheck", e);
       }

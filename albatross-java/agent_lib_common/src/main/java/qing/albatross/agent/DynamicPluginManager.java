@@ -158,7 +158,7 @@ public class DynamicPluginManager {
       pluginCache.put(pluginKey, plugin);
       return plugin;
     } catch (Throwable e) {
-      Albatross.log("Failed to load plugin: " + pluginClassName, e);
+      Albatross.log("Failed to load plugin: " + pluginClassName + " from " + pluginDexPath, e);
     }
     return null;
   }

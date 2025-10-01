@@ -15,14 +15,20 @@
  */
 package qing.albatross.app.agent;
 
+import static qing.albatross.agent.Const.FLAG_LOG;
+
 import android.annotation.SuppressLint;
 import android.app.Application;
 import android.app.Instrumentation;
 
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.util.HashMap;
 import java.util.Map;
 
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.agent.DynamicPluginManager;
+import qing.albatross.agent.PluginMessage;
 import qing.albatross.annotation.ConstructorBackup;
 import qing.albatross.annotation.ConstructorHook;
 import qing.albatross.annotation.ExecOption;
@@ -30,37 +36,98 @@ import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
 import qing.albatross.core.Albatross;
+import qing.albatross.core.InstructionCallback;
+import qing.albatross.core.InstructionListener;
+import qing.albatross.core.InvocationContext;
 import qing.albatross.exception.AlbatrossErr;
+import qing.albatross.reflection.ReflectUtils;
 import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
 
-public class AlbatrossInjectEntry extends UnixRpcInstance implements AppApi {
+public class AppInjectAgent extends UnixRpcInstance implements AppApi, InstructionCallback {
 
-  public static AlbatrossInjectEntry v() {
+  public static AppInjectAgent v() {
     return SingletonHolder.instance;
   }
 
-  private AlbatrossInjectEntry() {
+  private AppInjectAgent() {
+  }
+
+  static final int CLASS_NO_FIND = -1;
+  static final int METHOD_NO_FIND = -2;
+
+  @Override
+  public void onEnter(Member method, Object self, int dexPc, InvocationContext invocationContext) {
+    if (dexPc == 0)
+      PluginMessage.log("onEnter:" + method.getName(), new Exception(self == null ? "null" : self.toString()));
+    else
+      PluginMessage.log("M[" + dexPc + "] " + method.getName());
+  }
+
+  Map<Integer, InstructionListener> listeners = new HashMap<>();
+  int keyCount = 0;
+
+  @Override
+  public int hookMethod(String className, String methodName, int numArgs, String args, int dexPc) {
+    Class<?> clz = Albatross.findClassFromApplication(className);
+    if (clz == null) {
+      return CLASS_NO_FIND;
+    }
+    if (args == null) {
+      try {
+        Method method = ReflectUtils.findDeclaredMethodWithCount(clz, methodName, numArgs);
+        InstructionListener listener = listeners.get(dexPc);
+        Albatross.hookInstruction(method, dexPc, this);
+        int key = keyCount++;
+        listeners.put(key, listener);
+        return key;
+      } catch (NoSuchMethodException e) {
+        return METHOD_NO_FIND;
+      }
+    }
+    return 0;
+  }
+
+  @Override
+  public boolean unhookMethod(int listenerId) {
+    InstructionListener listener = listeners.remove(listenerId);
+    if (listener != null) {
+      listener.unHook();
+      return true;
+    }
+    return false;
   }
 
   static class SingletonHolder {
     @SuppressLint("StaticFieldLeak")
-    static AlbatrossInjectEntry instance = new AlbatrossInjectEntry();
+    static AppInjectAgent instance = new AppInjectAgent();
   }
 
 
-  public static boolean loadLibrary(int flags, String dexPath, String dexLib, String className, String pluginParams, int pluginFlags) {
-    Albatross.log("AlbatrossInjectEntry.loadLibrary");
+  public static boolean loadLibrary(int albatrossInitFlags, String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
+    Albatross.log("AppInjectAgent.loadLibrary");
     Albatross.initRpcClass(UnixRpcServer.class);
-    UnixRpcServer unixRpcServer = AlbatrossInjectEntry.v().createServer(null, true);
+    AppInjectAgent injectEntry = AppInjectAgent.v();
+    UnixRpcServer unixRpcServer = injectEntry.createServer(null, true);
     if (unixRpcServer == null) {
       Albatross.log("create server fail");
+      PluginMessage.enableMessage();
+    } else {
+      if ((albatrossInitFlags & FLAG_LOG) != 0) {
+        try {
+          PluginMessage.setMessageSender(injectEntry);
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      } else {
+        PluginMessage.enableMessage();
+      }
     }
-    return appendPlugin(dexPath, dexLib, className, pluginParams, pluginFlags) == 0;
+    return appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags) == 0;
   }
 
-  public static int appendPlugin(String dexPath, String dexLib, String className, String pluginParams, int pluginFlags) {
-    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(dexPath, dexLib, className, pluginParams, pluginFlags);
+  public static int appendPlugin(String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags);
     if (plugin == null)
       return 1;
     Application application = Albatross.currentApplication();
@@ -86,14 +153,6 @@ public class AlbatrossInjectEntry extends UnixRpcInstance implements AppApi {
 
   static boolean isApplicationOnCreateCalled = false;
 
-  @Override
-  public String getPackageName() {
-    Application application = Albatross.currentApplication();
-    if (application != null) {
-      return application.getPackageName();
-    }
-    return null;
-  }
 
   @Override
   protected Class<?> getApi() {
@@ -137,7 +196,7 @@ public class AlbatrossInjectEntry extends UnixRpcInstance implements AppApi {
   }
 
   public static void init() {
-    Albatross.log("AlbatrossInjectEntry.init");
+    Albatross.log("AppInjectAgent.init");
     Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
     for (AlbatrossPlugin plugin : pluginTable.values()) {
       if (plugin.load()) {

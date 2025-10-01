@@ -12,8 +12,11 @@ public class ActivityH {
   @MethodHookBackup
   static void onResume(Activity thiz) {
     onResume(thiz);
-    if (DemoPlugin.plugin.isEnable())
+    DemoPlugin plugin = DemoPlugin.plugin;
+    if (plugin.isEnable()) {
       Toast.makeText(thiz, DemoPlugin.prefix + ":" + thiz.getClass().getName(), Toast.LENGTH_LONG).show();
+      plugin.send(thiz.getClass().getName() + ":" + thiz.hashCode());
+    }
   }
 
 

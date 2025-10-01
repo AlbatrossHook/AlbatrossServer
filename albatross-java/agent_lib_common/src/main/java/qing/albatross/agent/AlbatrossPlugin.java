@@ -84,9 +84,14 @@ public abstract class AlbatrossPlugin {
     return this.enable;
   }
 
-  public static void send(String tag, String msg) {
-  }
-
 
   abstract public void afterApplicationCreate(Application application);
+
+
+  // native avoid inline
+  public native void send(String msg);
+
+  //native avoid inline
+  public native void send(String msg, Throwable tr);
+
 }
