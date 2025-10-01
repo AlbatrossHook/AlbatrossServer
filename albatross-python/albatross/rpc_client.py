@@ -14,7 +14,6 @@
 
 
 import json
-import os
 import select
 import socket
 import struct
@@ -801,6 +800,8 @@ class RpcClient(metaclass=RpcMeta):
 
   def __init__(self, host, port, name=None, timeout=None):
     super().__init__()
+    if not host:
+      host = '127.0.0.1'
     self.host = host
     self.port = port
     if timeout:
@@ -876,14 +877,18 @@ class RpcClient(metaclass=RpcMeta):
     return False
 
   def close(self):
+    subscriber: RpcClient = self.subscriber
+    if subscriber:
+      subscriber.shutdown()
+      self.subscriber = None
     sock = self.sock
     if sock:
       try:
+        self.sock = None
         get_monitor().unregister_socket(sock.fileno())
         sock.close()
       except:
         pass
-      self.sock = None
       if self.on_close_callback:
         try:
           self.on_close_callback(self)
@@ -926,7 +931,12 @@ class RpcClient(metaclass=RpcMeta):
 
   @rpc_api
   def subscribe(self):
-    pass
+    """
+    订阅RPC服务，用于接收广播消息
+
+    Returns:
+        订阅结果
+    """
 
   def register_broadcast_handler(self, broadcast_name, handler):
     setattr(self, 'handle_' + broadcast_name, handler)
@@ -1006,13 +1016,15 @@ class RpcClient(metaclass=RpcMeta):
 
   subscribe_thread: threading.Thread | bool | None = None
 
-  def join_subscribe(self):
+  def join_subscribe(self, max_time=360):
     subscribe_thread = self.subscribe_thread
     if subscribe_thread is not None:
-      while subscribe_thread.is_alive():
+      while subscribe_thread.is_alive() and max_time > 0:
         time.sleep(5)
+        max_time -= 5
         # subscribe_thread.join()
-      self.subscribe_thread = None
+      if not subscribe_thread.is_alive():
+        self.subscribe_thread = None
 
   subscriber = None
 
@@ -1043,15 +1055,30 @@ class RpcClient(metaclass=RpcMeta):
 
   @rpc_api
   def get_tid(self) -> int:
-    pass
+    """
+    获取当前线程ID
+
+    Returns:
+        int: 线程ID
+    """
 
   @rpc_api
   def ping(self) -> str:
-    pass
+    """
+    测试RPC连接是否正常
+
+    Returns:
+        str: ping响应消息
+    """
 
   @rpc_api
   def stop(self) -> void:
-    pass
+    """
+    停止RPC服务
+
+    Returns:
+        void: 无返回值
+    """
 
   def shutdown(self):
     self.continuous = False

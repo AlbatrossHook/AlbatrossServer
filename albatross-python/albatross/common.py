@@ -134,7 +134,7 @@ class Configuration(object):
 
   clear_history_launch = __make_get('clear_history_launch', True)
 
-  albatross_agent_class = __make_get('albatross_agent_class', "qing/albatross/app/agent/AlbatrossInjectEntry")
+  albatross_agent_class = __make_get('albatross_agent_class', "qing/albatross/app/agent/AppInjectAgent")
 
   albatross_register_func = __make_get('albatross_register_func', "albatross_load_init")
 
@@ -184,4 +184,4 @@ class Configuration(object):
     return address.split(':')[1]
 
   system_server_init_class = __make_get('system_server_init_class',
-    "qing/albatross/android/system_server/SystemServerInjectEntry")
+    "qing/albatross/android/system_server/SystemServerInjectAgent")

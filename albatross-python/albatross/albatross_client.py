@@ -44,6 +44,7 @@ class AlbatrossInitFlags(IntFlag):
   FLAG_INJECT = 0x800
   FLAG_INIT_RPC = 0x1000
   FLAG_CALL_CHAIN = 0x2000
+  FLAG_LOG = 0x10000
 
 
 class InjectResult(ByteEnum):
@@ -86,21 +87,68 @@ class SetResult(ByteEnum):
   SET_CHANGE = 5
 
 
+class ShellExecResult(object):
+
+  def __init__(self, exit_code, stdout, stderr):
+    self.exit_code = exit_code
+    self.stdout = stdout
+    self.stderr = stderr
+
+  @staticmethod
+  def parse_value(data, result):
+    s, _ = read_string(data, 0)
+    if s:
+      exit_code, stdout_len, shell_str = s.split(':', maxsplit=2)
+      stdout_len = int(stdout_len)
+      stdout = shell_str[:stdout_len]
+      stderr = shell_str[stdout_len + 1:]
+      return ShellExecResult(int(exit_code), stdout, stderr)
+    return None
+
+  def __repr__(self):
+    if self.stdout:
+      return self.stdout
+    if self.stderr:
+      return self.stderr
+    return f'exit:{self.exit_code}'
+
+
 class AlbatrossClient(RpcClient):
   lib_path = None
   class_name = None
 
   @rpc_api
   def get_process_isa(self, pid: int) -> RunTimeISA:
-    pass
+    """
+    获取指定进程的指令集架构
+
+    Args:
+        pid (int): 进程ID
+
+    Returns:
+        RunTimeISA: 运行时指令集架构
+    """
 
   @rpc_api
   def get_service_isa(self) -> RunTimeISA:
-    pass
+    """
+    获取服务的指令集架构
+
+    Returns:
+        RunTimeISA: 运行时指令集架构
+    """
 
   @rpc_api
   def get_process_pid(self, process_name: str):
-    pass
+    """
+    根据进程名获取进程ID
+
+    Args:
+        process_name (str): 进程名称
+
+    Returns:
+        int: 进程ID，如果未找到返回-1
+    """
 
   @staticmethod
   def parse_get_process_pid(data, result):
@@ -112,97 +160,322 @@ class AlbatrossClient(RpcClient):
   @rpc_api
   def inject_albatross(self, pid: int, flags: InjectFlag = InjectFlag.KEEP | InjectFlag.UNIX,
       temp_dir: str | None = None) -> InjectResult:
-    pass
+    """
+    向指定进程注入Albatross
+
+    Args:
+        pid (int): 目标进程ID
+        flags (InjectFlag): 注入标志，默认为KEEP|UNIX
+        temp_dir (str | None): 临时目录路径
+
+    Returns:
+        InjectResult: 注入结果
+    """
 
   @rpc_api
   def set_2nd_arch_lib(self, lib_path: str) -> bool:
-    pass
+    """
+    设置第二架构库路径
+
+    Args:
+        lib_path (str): 库文件路径
+
+    Returns:
+        bool: 是否设置成功
+    """
 
   @rpc_api
   def set_arch_lib(self, lib_path: str) -> bool:
-    pass
+    """
+    设置架构库路径
+
+    Args:
+        lib_path (str): 库文件路径
+
+    Returns:
+        bool: 是否设置成功
+    """
 
   @rpc_api
   def inject(self, pid: int, flags: int, data: bytes, lib_path: str, entry_name: str, temp_dir: str) -> InjectResult:
-    pass
+    """
+    注入自定义代码到指定进程
+
+    Args:
+        pid (int): 目标进程ID
+        flags (int): 注入标志
+        data (bytes): 注入数据
+        lib_path (str): 库文件路径
+        entry_name (str): 入口点名称
+        temp_dir (str): 临时目录路径
+
+    Returns:
+        InjectResult: 注入结果
+    """
 
   @rpc_api
   def load_plugin(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
       agent_register_func: str, flags: AlbatrossInitFlags, plugin_dex: str, plugin_lib: str,
       plugin_class: str, plugin_params: str, plugin_flags: int) -> DexLoadResult:
-    pass
+    """
+    加载插件到指定进程
+
+    Args:
+        pid (int): 目标进程ID
+        app_agent_dex (str): 应用代理DEX文件路径
+        agent_lib (str | None): 代理库文件路径
+        albatross_class (str): Albatross类名
+        agent_class (str): 代理类名
+        agent_register_func (str): 代理注册函数名
+        flags (AlbatrossInitFlags): 初始化标志
+        plugin_dex (str): 插件DEX文件路径
+        plugin_lib (str): 插件库文件路径
+        plugin_class (str): 插件类名
+        plugin_params (str): 插件参数
+        plugin_flags (int): 插件标志
+
+    Returns:
+        DexLoadResult: DEX加载结果
+    """
 
   @rpc_api
   def load_plugin_by_id(self, pid: int, plugin_id: int) -> DexLoadResult:
-    pass
+    """
+    根据插件ID加载插件
+
+    Args:
+        pid (int): 目标进程ID
+        plugin_id (int): 插件ID
+
+    Returns:
+        DexLoadResult: DEX加载结果
+    """
 
   @rpc_api
   def get_address(self, pid: int) -> str:
-    pass
+    """
+    获取指定进程的Server地址
+
+    Args:
+        pid (int): 进程ID
+
+    Returns:
+        str: Server地址
+    """
 
   @rpc_api
   def load_system_plugin(self, plugin_dex: str, plugin_lib: str, plugin_class: str, plugin_params: str,
       arg_int: int) -> DexLoadResult:
-    pass
+    """
+    加载系统插件
+
+    Args:
+        plugin_dex (str): 插件DEX文件路径
+        plugin_lib (str): 插件库文件路径
+        plugin_class (str): 插件类名
+        plugin_params (str): 插件参数
+        arg_int (int): 整数参数
+
+    Returns:
+        DexLoadResult: DEX加载结果
+    """
 
   @rpc_api
   def register_plugin(self, plugin_id: int, plugin_dex: str | None, plugin_lib: str | None, plugin_class: str,
       plugin_params: str | None, arg_int: int) -> SetResult:
-    pass
+    """
+    注册插件
+
+    Args:
+        plugin_id (int): 插件ID
+        plugin_dex (str | None): 插件DEX文件路径
+        plugin_lib (str | None): 插件库文件路径
+        plugin_class (str): 插件类名
+        plugin_params (str | None): 插件参数
+        arg_int (int): 整数参数
+
+    Returns:
+        SetResult: 设置结果
+    """
 
   @rpc_api
   def delete_plugin(self, plugin_id: int) -> byte:
-    pass
+    """
+    删除插件
+
+    Args:
+        plugin_id (int): 插件ID
+
+    Returns:
+        byte: 删除结果
+    """
 
   @rpc_api
   def clear_plugins(self) -> int:
-    pass
+    """
+    清除所有插件
+
+    Returns:
+        int: 清除的插件数量
+    """
 
   @rpc_api
   def modify_plugin(self, plugin_id: int, plugin_class: str, plugin_params: str, plugin_flags: int) -> byte:
-    pass
+    """
+    修改插件配置
+
+    Args:
+        plugin_id (int): 插件ID
+        plugin_class (str): 插件类名
+        plugin_params (str): 插件参数
+        plugin_flags (int): 插件标志
+
+    Returns:
+        byte: 修改结果
+    """
 
   @rpc_api
   def delete_plugin_rule(self, plugin_id: int, app_id: int) -> bool:
-    pass
+    """
+    删除插件规则
+
+    Args:
+        plugin_id (int): 插件ID
+        app_id (int): 应用ID
+
+    Returns:
+        bool: 是否删除成功
+    """
 
   @rpc_api
   def add_plugin_rule(self, plugin_id: int, app_id: int) -> SetResult:
-    pass
+    """
+    添加插件规则
+
+    Args:
+        plugin_id (int): 插件ID
+        app_id (int): 应用ID
+
+    Returns:
+        SetResult: 设置结果
+    """
 
   @rpc_api
   def load_dex(self, pid: int, dex_path: str, lib_path: str | None, register_class: str, class_name: str,
       agent_register_func: str, flags: AlbatrossInitFlags, p1: str, p2: int) -> DexLoadResult:
-    pass
+    """
+    加载DEX文件到指定进程
+
+    Args:
+        pid (int): 目标进程ID
+        dex_path (str): DEX文件路径
+        lib_path (str | None): 库文件路径
+        register_class (str): 注册类名
+        class_name (str): 类名
+        agent_register_func (str): 代理注册函数名
+        flags (AlbatrossInitFlags): 初始化标志
+        p1 (str): 参数1
+        p2 (int): 参数2
+
+    Returns:
+        DexLoadResult: DEX加载结果
+    """
 
   @rpc_api
   def detach(self, pid: int, flags: InjectFlag) -> bool:
-    pass
+    """
+    从指定进程分离
+
+    Args:
+        pid (int): 目标进程ID
+        flags (InjectFlag): 分离标志
+
+    Returns:
+        bool: 是否分离成功
+    """
 
   @rpc_api
   def launch(self, process_name: str, activity_name: str = None, uid: int = 0) -> str:
-    pass
+    """
+    启动应用进程
+
+    Args:
+        process_name (str): 进程名称
+        activity_name (str): Activity名称，可选
+        uid (int): 用户ID，默认为0
+
+    Returns:
+        str: 启动结果
+    """
 
   @rpc_api
   def launch_intercept(self, process_name: str, activity_name: str = None, uid: int = 0) -> str:
-    pass
+    """
+    启动应用进程并拦截
+
+    Args:
+        process_name (str): 进程名称
+        activity_name (str): Activity名称，可选
+        uid (int): 用户ID，默认为0
+
+    Returns:
+        str: 启动结果
+    """
 
   @rpc_api
   def set_system_server_agent(self, dex_path: str, init_class: str, server_name: str = 'system_server',
       load_flags: AlbatrossInitFlags = AlbatrossInitFlags.NONE,
       address: str | None = None, init_flags: int = 0) -> SetResult:
-    pass
+    """
+    设置系统服务器代理
+
+    Args:
+        dex_path (str): DEX文件路径
+        init_class (str): 初始化类名
+        server_name (str): 服务器名称，默认为'system_server'
+        load_flags (AlbatrossInitFlags): 加载标志，默认为NONE
+        address (str | None): 地址，可选
+        init_flags (int): 初始化标志，默认为0
+
+    Returns:
+        SetResult: 设置结果
+    """
 
   @rpc_api
   def load_system_plugin(self, plugin_dex: str, plugin_lib: str | None, plugin_class: str, plugin_params: str | None,
       plugin_flags: int) -> DexLoadResult:
-    pass
+    """
+    加载系统插件
+
+    Args:
+        plugin_dex (str): 插件DEX文件路径
+        plugin_lib (str | None): 插件库文件路径
+        plugin_class (str): 插件类名
+        plugin_params (str | None): 插件参数
+        plugin_flags (int): 插件标志
+
+    Returns:
+        DexLoadResult: DEX加载结果
+    """
 
   @rpc_api
   def set_app_agent(self, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
       agent_register_func: str = "albatross_load_init",
       flags: AlbatrossInitFlags = AlbatrossInitFlags.NONE) -> SetResult:
-    pass
+    """
+    设置应用代理
+
+    Args:
+        app_agent_dex (str): 应用代理DEX文件路径
+        agent_lib (str | None): 代理库文件路径
+        albatross_class (str): Albatross类名
+        agent_class (str): 代理类名
+        agent_register_func (str): 代理注册函数名，默认为"albatross_load_init"
+        flags (AlbatrossInitFlags): 初始化标志，默认为NONE
+
+    Returns:
+        SetResult: 设置结果
+    """
 
   @broadcast_api
   def process_disconnect(self, pid: int) -> void:
@@ -214,37 +487,90 @@ class AlbatrossClient(RpcClient):
 
   @broadcast_api
   def launch_process(self, uid: int, pid: int, process_info: dict) -> void:
-    pass
+    """
+    进程启动广播
+
+    Args:
+        uid (int): 用户ID
+        pid (int): 进程ID
+        process_info (dict): 进程信息
+
+    Returns:
+        void: 无返回值
+    """
 
   @rpc_api
   def patch_selinux(self) -> bool:
-    pass
+    """
+    修补SELinux策略
+
+    Returns:
+        bool: 是否修补成功
+    """
 
   @rpc_api
   def is_injected(self, pid: int) -> bool:
-    pass
+    """
+    检查指定进程是否已注入
+
+    Args:
+        pid (int): 进程ID
+
+    Returns:
+        bool: 是否已注入
+    """
 
   @rpc_api
   def uid_processes(self, uid: int, only_java: bool) -> list:
-    pass
+    """
+    获取指定用户ID的进程列表
+
+    Args:
+        uid (int): 用户ID
+        only_java (bool): 是否只返回Java进程
+
+    Returns:
+        list: 进程信息列表
+    """
 
   @rpc_api
   def unload_plugin_dex(self, pid: int, plugin_id: int) -> DexLoadResult:
+    """
+    卸载指定进程的插件DEX
+
+    Args:
+        pid (int): 目标进程ID
+        plugin_id (int): 插件ID
+
+    Returns:
+        DexLoadResult: DEX卸载结果
+    """
+
+  @rpc_api
+  def disable_plugin(self, pid: int, plugin_id: int) -> DexLoadResult:
+    pass
+
+  @rpc_api
+  def shell(self, command: str) -> ShellExecResult:
     pass
 
   @staticmethod
   def parse_uid_processes(data, result):
     if result >= 0:
       s, idx = read_string(data, 0)
-      infos = s.split(',')
+      if not s:
+        return []
+      infos = s.split('\n')
       processes = []
       for info in infos:
-        name, pid, is_java = info.split('^_^')
+        name, pid, is_java = info.split('|')
         processes.append({'name': name, 'pid': int(pid), 'is_java': int(is_java)})
       return processes
     else:
       return []
 
   def get_java_processes_by_uid(self, uid):
+    if not uid:
+      return []
     processes = self.uid_processes(uid, True)
     return [p['pid'] for p in processes if p['is_java']]

@@ -378,7 +378,7 @@ class AlbatrossDevice(object):
     update = self.push_file(server_file, server_dst_path, check=True, mode='500')
     self.shell('chown root:root ' + server_dst_path)
     lib_dst = Configuration.lib_path + self.abi_lib_name + '/'
-    update += self.push_file(abi_lib, lib_dst)
+    update += self.push_file(abi_lib, lib_dst, file_type=self.file_type)
     self.lib_dir = lib_dst
     self.lib_dst = lib_dst + Configuration.lib_name
     lib_dst_32 = None
@@ -431,7 +431,7 @@ class AlbatrossDevice(object):
           return
       except:
         pass
-      cached_property.delete(self, "system_server_subscriber")
+    cached_property.delete(self, "system_server_subscriber")
 
   def on_system_client_close(self, client):
     if self.reconnect:
@@ -580,7 +580,8 @@ class AlbatrossDevice(object):
       client.set_system_server_agent(agent_dst, Configuration.system_server_init_class, "system_server",
         AlbatrossInitFlags.NONE, None, 3)
       client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
-        Configuration.albatross_agent_class, Configuration.albatross_register_func, AlbatrossInitFlags.FLAG_CALL_CHAIN)
+        Configuration.albatross_agent_class, Configuration.albatross_register_func,
+        AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_LOG)
       if not client.patch_selinux():
         self.setenforce(False)
       return True
@@ -730,6 +731,7 @@ class AlbatrossDevice(object):
           else:
             lib_dst_device = None
           agent_dex = self.agent_dex
+          time.sleep(1)
           res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
             Configuration.albatross_agent_class, Configuration.albatross_register_func,
             init_flags, plugin_dex_device, lib_dst_device, plugin_class, plugin_params,
@@ -925,9 +927,12 @@ class AlbatrossDevice(object):
               _self.start_app(target_pkg)
               time.sleep(10)
               pids = _self.client.get_java_processes_by_uid(target_uid)
-            for pid in pids:
-              _self.client.unload_plugin_dex(pid, plugin.plugin_id)
-              _self.client.load_plugin_by_id(pid, plugin.plugin_id)
+              for pid in pids:
+                _self.client.load_plugin_by_id(pid, plugin.plugin_id)
+            else:
+              for pid in pids:
+                _self.client.unload_plugin_dex(pid, plugin.plugin_id)
+                _self.client.load_plugin_by_id(pid, plugin.plugin_id)
 
         except Exception as e:
           print(f"\n更新插件失败: {str(e)}", file=sys.stderr)
