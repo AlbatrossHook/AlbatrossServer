@@ -14,6 +14,7 @@ def main(device_id=None):
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
+  client.create_subscriber()
   client.clear_plugins()
   for pkg in user_pkgs:
     if 'albatross' in pkg and 'inject_demo' not in pkg:
@@ -39,8 +40,9 @@ def main(device_id=None):
         app_client.close()
         device.remove_forward_port(port)
   client.clear_plugins()
-  albatross.destroy()
   print('finish test')
+  device.remove_albatross_port()
+  albatross.destroy()
 
 
 if __name__ == '__main__':

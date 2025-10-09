@@ -24,6 +24,9 @@ def main(device_id=None):
     device.start_app(pkg)
     time.sleep(3)
     pids = device.attach(pkg, plugin_dex, plugin_class, init_flags=AlbatrossInitFlags.FLAG_LOG)
+    if not pids:
+      print(f'attach {pkg} fail')
+      continue
     time.sleep(2)
     app_clients = []
     for pid in pids:

@@ -19,6 +19,47 @@ from .wrapper import cached_class_property
 
 OUT_TIME_CODE = 996
 FAULT_CODE = 997
+import random
+import string
+
+lib_origin_name = 'libalbatross_base.so'
+
+
+def generate_random_variable_name(length=None, min_length=1, max_length=20):
+  """
+  生成随机变量名，可指定长度或使用随机长度
+
+  参数:
+      length: 可选，变量名的固定长度。如果为None，则使用随机长度
+      min_length: 随机长度时的最小长度，默认为1
+      max_length: 随机长度时的最大长度，默认为20
+
+  返回:
+      随机生成的符合Python命名规范的变量名
+  """
+  # 确定最终使用的长度
+  if length is not None:
+    if length <= 0:
+      raise ValueError("变量名长度必须大于0")
+    final_length = length
+  else:
+    if min_length <= 0 or max_length < min_length:
+      raise ValueError("无效的长度范围设置")
+    final_length = random.randint(min_length, max_length)
+
+  # 第一个字符只能是字母或下划线
+  first_chars = string.ascii_letters + '_'
+  # 后续字符可以是字母、数字或下划线
+  other_chars = string.ascii_letters + string.digits + '_'
+
+  # 生成第一个字符
+  variable_name = [random.choice(first_chars)]
+
+  # 生成剩余字符
+  if final_length > 1:
+    variable_name += [random.choice(other_chars) for _ in range(final_length - 1)]
+
+  return ''.join(variable_name)
 
 
 def run_shell(cmd, timeout=20, split=False):
@@ -52,7 +93,13 @@ class Configuration(object):
       with open(local_config) as fp:
         return toml.load(fp)
     with open(current_dir + '/albatross_config.toml') as fp:
-      return toml.load(fp)
+      config = toml.load(fp)
+    lib_name = generate_random_variable_name(min_length=3, max_length=6)
+    config['lib_name'] = f'lib{lib_name}.so'
+    config['app_agent_name'] = f'framework-{generate_random_variable_name(3)}.jar'
+    with open(local_config, 'w') as fp:
+      toml.dump(config, fp)
+    return config
 
   @staticmethod
   def __make_get(name, default_value):
@@ -67,7 +114,7 @@ class Configuration(object):
     func.__name__ = name
     return cached_class_property(func)
 
-  lib_name = __make_get('lib_name', 'libalbatross_base.so')
+  lib_name = __make_get('lib_name', lib_origin_name)
 
   @cached_class_property
   def adb(self):
@@ -140,7 +187,7 @@ class Configuration(object):
 
   system_server_agent_dst = __make_get('system_server_agent_dst', '/data/dalvik-cache/albatross_server.dex')
 
-  app_agent_dst = __make_get('app_agent_dst', '/data/dalvik-cache/app_agent.dex')
+  app_agent_name = __make_get('app_agent_name', 'framework-albatross.jar')
 
   app_plugin_home = __make_get('app_plugin_home', '/data/dalvik-cache/')
 
@@ -154,13 +201,13 @@ class Configuration(object):
   def server_path_map(self):
     maps = {}
     jni_libs = self.jni_libs
-    lib_name = self.lib_name
+    lib_name = lib_origin_name
     for arch in self.support_abi_list:
       arch_dir = jni_libs + arch + '/'
       if '64' in arch:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name,
-        (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
-          jni_libs + f'x86/{lib_name}', 'x86'))
+                      (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
+                        jni_libs + f'x86/{lib_name}', 'x86'))
       else:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name, None)
     return maps
@@ -172,6 +219,8 @@ class Configuration(object):
   server_dst_path = __make_get('server_dst_path', 'albatross_server')
 
   lib_path = __make_get('lib_path', '/data/dalvik-cache/')
+
+  mount_path = __make_get('mount_path', '/system_ext/')
 
   server_port = __make_get('server_port', 19088)
 

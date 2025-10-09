@@ -20,7 +20,7 @@ import sys
 import time
 
 from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA, SetResult
-from .common import Configuration, run_shell
+from .common import Configuration, run_shell, lib_origin_name
 from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled
 from .plugin import Plugin
 from .rpc_client import byte
@@ -108,6 +108,8 @@ pkg_pattern = re.compile(r"package:([\w.]+)(?:\s+|$)")
 
 
 class AlbatrossDevice(object):
+  anti_detection = True
+
   ret_code: int
   shell_user = 'shell'
   lib_dst: str
@@ -215,7 +217,7 @@ class AlbatrossDevice(object):
       return "Permission" not in self.shell("rm /data/local/file_test")
 
   def su_shell(self, cmd, timeout=10):
-    cmd = self.shellcmd + "' {} -c ".format(self.su_file) + cmd + "'"
+    cmd = self.shellcmd + "'{} -c \"".format(self.su_file) + cmd + "\"'"
     ret = run_shell(cmd, timeout=timeout)
     self.ret_code = ret[0]
     result = ret[1].decode().strip()
@@ -252,37 +254,47 @@ class AlbatrossDevice(object):
 
   @cached_property
   def agent_dex(self):
-    injector_dir = Configuration.app_plugin_home
-    dst = injector_dir + "app_agent.dex"
+    plugin_dir = Configuration.app_plugin_home
+    dst = plugin_dir + Configuration.app_agent_name
     res = self.push_file(Configuration.app_agent_file, dst, mode='444', check=True)
     if res:
-      oat_dir = injector_dir + 'oat/' + self.abi_lib_name
-      self.root_shell('mkdir -p ' + oat_dir)
+      self.create_dex_oat_dir(dst)
     return dst
 
   def get_file_md5(self, filepath):
     ret: str = self.shell('md5sum ' + filepath)
-    if 'No such' in ret or not ret:
+    if not ret or 'No such' in ret:
       return None
+    if 'permission' in ret.lower():
+      ret = self.root_shell('md5sum ' + filepath)
+      if not ret or 'No such' in ret:
+        return None
     return ret.split()[0].strip()
 
   def delete_file(self, file_path):
     self.root_shell('rm -rf {}'.format(file_path))
     return self.ret_code == 0
 
-  def push_file(self, file, dst, check=False, mode=None, file_type=None):
+  def push_file(self, file, dst, check=False, mode=None, file_type=None, owner=None):
     if not os.path.exists(file):
       return False
     md5_dst = file_md5(file)
+    extra_cmds = []
+    if mode:
+      extra_cmds.append(f'chmod {mode} {dst}')
+    if file_type:
+      extra_cmds.append(f'chcon u:object_r:{file_type}:s0 {dst}')
+    if owner:
+      extra_cmds.append(f'chown {owner}:{owner} {dst}')
     if not md5_dst:
       return False
     if check or os.stat(file).st_size > 8192:
       if dst[-1] == "/":
         dst += os.path.basename(file)
-      md5_src = self.get_file_md5(dst)
-      if md5_dst == md5_src:
-        if file_type:
-          self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
+      md5_current = self.get_file_md5(dst)
+      if md5_dst == md5_current:
+        if extra_cmds:
+          self.root_shell(';'.join(extra_cmds))
         return False
     if self.shell_user == 'shell':
       self.delete_file(dst)
@@ -290,10 +302,8 @@ class AlbatrossDevice(object):
     ret_code, s = run_shell(command)
     res = ret_code == 0
     if res:
-      if mode:
-        self.shell('chmod {} {}'.format(mode, dst))
-      if file_type:
-        self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
+      if extra_cmds:
+        self.root_shell(';'.join(extra_cmds))
       print(s)
       return res
     if self.is_root and self.shell_user == 'shell':
@@ -302,13 +312,11 @@ class AlbatrossDevice(object):
       ret_code, s = run_shell(command)
       res = ret_code == 0
       if res:
-        command = self.root_shell('mv {} {}'.format(tmp_path, dst))
+        command = self.root_shell(f'mkdir -p {os.path.dirname(dst)} && mv {tmp_path} {dst}')
         if not command:
           print(s)
-          if mode:
-            self.root_shell('chmod {} {}'.format(mode, dst))
-          if file_type:
-            self.root_shell(f'chcon u:object_r:{file_type}:s0 {dst}')
+          if extra_cmds:
+            self.root_shell(';'.join(extra_cmds))
           return True
     return False
 
@@ -375,18 +383,23 @@ class AlbatrossDevice(object):
     device_abi = self.cpu_abi
     server_file, abi_lib, abi_lib32 = Configuration.get_server_path(device_abi)
     assert os.path.exists(server_file)
-    update = self.push_file(server_file, server_dst_path, check=True, mode='500')
-    self.shell('chown root:root ' + server_dst_path)
-    lib_dst = Configuration.lib_path + self.abi_lib_name + '/'
-    update += self.push_file(abi_lib, lib_dst, file_type=self.file_type)
-    self.lib_dir = lib_dst
-    self.lib_dst = lib_dst + Configuration.lib_name
+    update = self.push_file(server_file, server_dst_path, check=True, mode='500', owner='root')
+    lib_dir = Configuration.lib_path + self.abi_lib_name + '/'
+    server_lib_dst = lib_dir + lib_origin_name
+    update += self.push_file(abi_lib, server_lib_dst, file_type=self.file_type)
+    self.lib_dir = lib_dir
+    lib_name = Configuration.lib_name
+    app_lib_dst = lib_dir + lib_name
+    self.lib_dst = app_lib_dst
+    if app_lib_dst != server_lib_dst:
+      self.push_file(abi_lib, app_lib_dst, mode='644', file_type=self.file_type)
     lib_dst_32 = None
+    lib_src_32 = None
     if abi_lib32 and self.support_32:
       lib_src_32, abi32_name = abi_lib32
       self.lib32_dir = Configuration.lib_path + abi32_name + "/"
-      lib_dst_32 = self.lib32_dir + Configuration.lib_name
-      self.push_file(lib_src_32, lib_dst_32)
+      lib_dst_32 = self.lib32_dir + lib_name
+      self.push_file(lib_src_32, lib_dst_32, mode='644', file_type=self.file_type)
       self.lib32_dst = lib_dst_32
     if update and self.update_kill:
       self.kill_process(os.path.basename(server_dst_path))
@@ -395,23 +408,25 @@ class AlbatrossDevice(object):
         client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
         client.set_arch_lib(self.lib_dst)
         if lib_dst_32:
-          client.set_2nd_arch_lib(lib_dst_32)
+          client.set_2nd_arch_lib(self.lib32_dst)
         return client
       except:
         self.kill_process(os.path.basename(server_dst_path))
-    if self.shell_user == 'shell':
-      cmd_prefix = "nohup su -c "
-    else:
-      cmd_prefix = "nohup "
     if type(server_port) == str and server_port.startswith('localabstract:'):
       server_port = server_port.split(':')[1]
-    cmd = f'{self.shellcmd} "LD_LIBRARY_PATH={lib_dst} {cmd_prefix} {server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"'
+    if self.shell_user == 'shell':
+      cmd_prefix = "nohup su -c "
+      cmd = f'{self.shellcmd} \'LD_LIBRARY_PATH={lib_dir} {cmd_prefix} "{server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"\''
+    else:
+      cmd_prefix = "nohup "
+      cmd = f'{self.shellcmd} "LD_LIBRARY_PATH={lib_dir} {cmd_prefix} {server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"'
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     time.sleep(2)
     process.terminate()
     client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
+    client.set_arch_lib(self.lib_dst)
     if lib_dst_32:
-      client.set_2nd_arch_lib(lib_dst_32)
+      client.set_2nd_arch_lib(self.lib32_dst)
     if self.is_selinux_on():
       client.patch_selinux()
     return client
@@ -450,17 +465,18 @@ class AlbatrossDevice(object):
     subscribe_client.subscribe()
     return subscribe_client
 
+  system_client_class_impl = SystemServerClient
+
   @cached_property
   def system_server_client(self) -> SystemServerClient:
     client = self.client
+    system_client_class = self.system_client_class_impl
     agent_dst = Configuration.system_server_agent_dst
     if not self.is_selinux_on():
       client.patch_selinux()
     update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444', file_type=self.file_type)
     if update:
-      agent_dir = os.path.dirname(agent_dst)
-      oat_dir = agent_dir + '/oat/' + self.abi_lib_name
-      self.root_shell('mkdir -p ' + oat_dir)
+      self.create_dex_oat_dir(agent_dst)
       server_pid = client.get_process_pid('system_server')
       if server_pid > 0 and client.is_injected(server_pid):
         self.restart_system_server()
@@ -472,22 +488,22 @@ class AlbatrossDevice(object):
       server_pid = client.get_process_pid('system_server')
     if server_pid <= 0:
       return cached_property.nil_value
-    res = client.inject_albatross(server_pid, SystemServerClient.inject_flags, '')
+    res = client.inject_albatross(server_pid, system_client_class.inject_flags, '')
     if res < 0:
       return cached_property.nil_value
     # unix_address = Configuration.system_server_listen_address
     res = client.load_dex(server_pid, agent_dst, None, Configuration.albatross_class_name,
       Configuration.system_server_init_class, Configuration.albatross_register_func,
-      SystemServerClient.albatross_init_flags, None, 0, timeout=30)
+      system_client_class.albatross_init_flags, None, 0, timeout=30)
     if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
       system_server_address = client.get_address(server_pid)
       system_server_address = 'localabstract:' + system_server_address
       self.system_server_address = system_server_address
       port = self.get_forward_port(system_server_address)
-      system_server = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
+      system_server = system_client_class('127.0.0.1', port, 'system-' + self.device_id)
       system_server.init()
       system_server.set_on_close_listener(self.on_system_client_close)
-      subscribe_client = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
+      subscribe_client = system_client_class('127.0.0.1', port, 'system-' + self.device_id)
       subscribe_client.set_on_close_listener(self.on_system_subscribe_close)
       subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
       subscribe_client.subscribe()
@@ -563,6 +579,11 @@ class AlbatrossDevice(object):
     self.app_launch_count[app_id] = 0
     server_client.start_activity(target_package, None, 0)
 
+  def create_dex_oat_dir(self, dex_path):
+    dex_dir = os.path.dirname(dex_path)
+    oat_dir = dex_dir + '/oat/' + self.abi_lib_name
+    self.root_shell('mkdir -p ' + oat_dir + " && chmod 777 " + oat_dir)
+
   @cached_property
   def init_plugin_env(self):
     try:
@@ -570,9 +591,7 @@ class AlbatrossDevice(object):
       agent_dst = Configuration.system_server_agent_dst
       update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444', file_type=self.file_type)
       if update:
-        agent_dir = os.path.dirname(agent_dst)
-        oat_dir = agent_dir + '/oat/' + self.abi_lib_name
-        self.root_shell('mkdir -p ' + oat_dir)
+        self.create_dex_oat_dir(agent_dst)
         server_pid = client.get_process_pid('system_server')
         if server_pid > 0 and client.is_injected(server_pid):
           self.restart_system_server()
@@ -618,7 +637,7 @@ class AlbatrossDevice(object):
     self.start_app(target_package)
     return True
 
-  def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.NONE):
+  def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.FLAG_LOG):
     client = self.client
     if isinstance(package_or_pid, str):
       pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
@@ -753,6 +772,11 @@ class AlbatrossDevice(object):
       self.forward(local_port, remote_port)
     return local_port
 
+  def remove_albatross_port(self):
+    for s, lp, rp in self.forward_list():
+      if re.findall('localabstract:albatross_\\d+', rp):
+        run_shell(self.cmd + 'forward --remove ' + lp)
+
   def remove_forward_port(self, port):
     if isinstance(port, int):
       port = 'tcp:' + str(port)
@@ -813,6 +837,14 @@ class AlbatrossDevice(object):
   def switch_app(self):
     cmd = self.shellcmd + 'input keyevent KEYCODE_APP_SWITCH'
     run_shell(cmd)
+
+  @cached_property
+  def sdk_version(self):
+    try:
+      sdk = int(run_shell(self.shellcmd + "getprop ro.build.version.sdk")[1].decode().strip())
+      return sdk
+    except:
+      return None
 
   def pull_file(self, src_android, dst_pc, is_del=False):
     command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)

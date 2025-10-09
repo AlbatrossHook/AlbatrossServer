@@ -48,6 +48,7 @@ class AlbatrossInitFlags(IntFlag):
 
 
 class InjectResult(ByteEnum):
+  INJECT_PROCESS_SLEEPING = -6,
   ARCH_NO_SUPPORT = -5,
   PROCESS_DEAD = -4,
   NO_LIB = -3,
@@ -73,7 +74,8 @@ class DexLoadResult(ByteEnum):
   DEX_CLASS_NO_FIND = 5
   DEX_INIT_FAIL = 6
   METHOD_NO_FIND = 7
-  DEX_SYSTEM_SERVER_ERR = 9
+  DEX_SYSTEM_SERVER_ERR = 9,
+  DEX_PROCESS_SLEEPING = 10,
   DEX_LOAD_SUCCESS = 20
   DEX_ALREADY_LOAD = 21
 
@@ -173,7 +175,7 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
-  def set_2nd_arch_lib(self, lib_path: str) -> bool:
+  def set_2nd_arch_lib(self, lib_path: str) -> SetResult:
     """
     设置第二架构库路径
 
@@ -185,7 +187,7 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
-  def set_arch_lib(self, lib_path: str) -> bool:
+  def set_arch_lib(self, lib_path: str) -> SetResult:
     """
     设置架构库路径
 
@@ -254,13 +256,13 @@ class AlbatrossClient(RpcClient):
   @rpc_api
   def get_address(self, pid: int) -> str:
     """
-    获取指定进程的Server地址
+    获取指定进程的地址信息
 
     Args:
         pid (int): 进程ID
 
     Returns:
-        str: Server地址
+        str: 地址信息
     """
 
   @rpc_api
@@ -498,6 +500,7 @@ class AlbatrossClient(RpcClient):
     Returns:
         void: 无返回值
     """
+    print(f'[*] process uid:{uid} pid:{pid} info: {process_info}')
 
   @rpc_api
   def patch_selinux(self) -> bool:

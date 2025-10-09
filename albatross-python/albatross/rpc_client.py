@@ -975,6 +975,7 @@ class RpcClient(metaclass=RpcMeta):
   def __subscribe_loop(self):
     self.can_send = False
     try:
+      self.sock.settimeout(20)
       while self.continuous:
         try:
           idx, cmd, data = rpc_receive_data(self.sock)
