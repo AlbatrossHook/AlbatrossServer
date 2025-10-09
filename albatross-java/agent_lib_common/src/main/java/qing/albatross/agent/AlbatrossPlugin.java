@@ -18,6 +18,7 @@ package qing.albatross.agent;
 import android.app.Application;
 
 import qing.albatross.core.Albatross;
+import qing.albatross.server.UnixRpcInstance;
 
 public abstract class AlbatrossPlugin {
 
@@ -33,7 +34,7 @@ public abstract class AlbatrossPlugin {
     this.libName = libName;
   }
 
-  public boolean load() {
+  public boolean load(UnixRpcInstance agent) {
     try {
       if (libName != null)
         System.loadLibrary(libName);

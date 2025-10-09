@@ -132,7 +132,7 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
       return 1;
     Application application = Albatross.currentApplication();
     if (application != null) {
-      if (plugin.load()) {
+      if (plugin.load(AppInjectAgent.v())) {
         plugin.beforeApplicationCreate(application);
         plugin.afterApplicationCreate(application);
       } else {
@@ -199,7 +199,7 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     Albatross.log("AppInjectAgent.init");
     Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
     for (AlbatrossPlugin plugin : pluginTable.values()) {
-      if (plugin.load()) {
+      if (plugin.load(AppInjectAgent.v())) {
         plugin.beforeMakeApplication();
       } else {
         Albatross.log("plugin load return false:" + plugin.getClass());

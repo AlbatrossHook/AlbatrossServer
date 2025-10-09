@@ -411,10 +411,10 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
   }
 
 
-  public static int appendPlugin(String pluginDex, String pluginLib, String pluginClass, String argString, int argInt) {
-    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDex, pluginLib, pluginClass, argString, argInt);
+  public static int appendPlugin(String pluginDex, String pluginLib, String pluginClass, String pluginParams, int pluginFlags) {
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDex, pluginLib, pluginClass, pluginParams, pluginFlags);
     if (plugin != null) {
-      if (plugin.load()) {
+      if (plugin.load(SystemServerInjectAgent.v())) {
         plugin.onAttachSystem(Albatross.currentApplication());
       }
       return 0;

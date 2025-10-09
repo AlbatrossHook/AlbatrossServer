@@ -5,6 +5,7 @@ import android.app.Application;
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
+import qing.albatross.server.UnixRpcInstance;
 
 public class DemoPlugin extends AlbatrossPlugin {
 
@@ -23,9 +24,9 @@ public class DemoPlugin extends AlbatrossPlugin {
   }
 
   @Override
-  public boolean load() {
+  public boolean load(UnixRpcInstance agent) {
     Albatross.log("DemoPlugin load");
-    return super.load();
+    return super.load(agent);
   }
 
   @Override

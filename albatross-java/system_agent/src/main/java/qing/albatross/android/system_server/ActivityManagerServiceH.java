@@ -34,6 +34,11 @@ import qing.albatross.reflection.FieldDef;
 public class ActivityManagerServiceH {
 
 
+  public static Object mActivityManagerService;
+
+//  public ActivityTaskManagerService mActivityTaskManager;
+
+
   @TargetClass(className = "com.android.server.am.ActivityManagerService$PidMap", required = false)
   public static class PidMapH {
     @MethodBackup
@@ -46,7 +51,7 @@ public class ActivityManagerServiceH {
 
 
   @MethodBackup
-  @MethodHook({"android.app.IApplicationThread", "int", "int", "long"})
+  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"},maxSdk = 33)
   static boolean attachApplicationLocked(Object ams, Object iApplicationThread,
                                          int pid, int callingUid, long startSeq) {
     interceptCheck(ams, pid, callingUid);
@@ -55,7 +60,7 @@ public class ActivityManagerServiceH {
 
 
   @MethodBackup
-  @MethodHook({"android.app.IApplicationThread", "int", "int", "long"})
+  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"},minSdk = 33)
   static void attachApplicationLocked$Hook_U(Object ams, Object iApplicationThread,
                                              int pid, int callingUid, long startSeq) {
     interceptCheck(ams, pid, callingUid);
@@ -63,6 +68,8 @@ public class ActivityManagerServiceH {
   }
 
   private static void interceptCheck(Object ams, int pid, int callingUid) {
+    if (mActivityManagerService == null)
+      mActivityManagerService = ams;
     if (shouldInterceptUid(callingUid) && SystemServerInjectAgent.v().getSubscriberSize() > 0) {
       try {
         JSONObject jsonObject = new JSONObject();
@@ -101,5 +108,4 @@ public class ActivityManagerServiceH {
       }
     }
   }
-
 }

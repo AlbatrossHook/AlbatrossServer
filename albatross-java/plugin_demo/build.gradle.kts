@@ -38,9 +38,11 @@ dependencies {
     if (useSourceModules) {
         compileOnly(project(":annotation"))
         compileOnly(project(":core"))
+        compileOnly(project(":server"))
     } else {
         compileOnly("qing.albatross:annotation-release:1.0@aar")
         compileOnly("qing.albatross:core-release:1.0@aar")
+        compileOnly("qing.albatross:server-release:1.0@aar")
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
     compileOnly(project(":app_agent_lib"))
