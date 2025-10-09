@@ -1,3 +1,6 @@
+version 2.1.0
+ - Anti detection by remove the writable executable  memory fragments.
+
 version 2.0.2:
  - rpc improve.
  - Add annotations to the rpc method.
