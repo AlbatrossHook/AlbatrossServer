@@ -42,6 +42,7 @@
 - **Android版本**: 7到15（Nougat到Vanilla Ice Cream）
 - **支持的ABI**: `x86`, `x86_64`, `arm`, `arm64`
 - 必须支持**AlbatrossAndroid** Hook
+- launch启动app时lsposed必须禁用，如果是注入app，则保证lsposed不在目标进程中
 
 ### 主机端
 - 启用并可访问ADB

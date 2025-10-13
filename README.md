@@ -42,6 +42,7 @@ Contains essential runtime assets required for injection:
 - **Android version**: 7 through 15 (Nougat to Vanilla Ice Cream)
 - **Supported ABIs**: `x86`, `x86_64`, `arm`, `arm64`
 - Must support **AlbatrossAndroid** hooking
+- Lsposed must be disabled when launch the target app. If injecting app, it ensures that lsposed is not in the target process
 
 ### Host
 -  ADB enabled and accessible
