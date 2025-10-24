@@ -7,6 +7,7 @@ from albatross.common import Configuration
 
 
 def main(device_id=None):
+  print('launch mode is deprecated,use launch fast instead.')
   device = albatross.get_device(device_id)
   assert device.is_root
   device.wake_up()
@@ -15,6 +16,10 @@ def main(device_id=None):
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
+  if client.is_lsposed_injected():
+    print("Lsposed injected,not support!")
+    albatross.destroy()
+    return
   for pkg in user_pkgs:
     if 'albatross' in pkg and 'inject_demo' not in pkg:
       continue

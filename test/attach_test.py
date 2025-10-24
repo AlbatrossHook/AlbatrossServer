@@ -23,7 +23,8 @@ def main(device_id=None):
     device.stop_app(pkg)
     device.start_app(pkg)
     time.sleep(3)
-    pids = device.attach(pkg, plugin_dex, plugin_class, init_flags=AlbatrossInitFlags.FLAG_LOG)
+    pids = device.attach(pkg, plugin_dex, plugin_class,
+      init_flags=AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN)
     if not pids:
       print(f'attach {pkg} fail')
       continue
