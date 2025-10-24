@@ -550,6 +550,10 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
+  def is_lsposed_injected(self) -> bool:
+    pass
+
+  @rpc_api
   def disable_plugin(self, pid: int, plugin_id: int) -> DexLoadResult:
     pass
 

@@ -93,10 +93,25 @@ def rpc_send_data(sock, data, call_id, cmd):
     sock.send(head)
 
 
+def safe_receive(sock, n):
+  chunk = sock.recv(n)
+  if not chunk:
+    raise socket.error("Socket closed")
+  count = len(chunk)
+  if count == n:
+    return chunk
+  buff_list = [chunk]
+  while count < n:
+    chunk = sock.recv(n - count)
+    if not chunk:
+      raise socket.error("Socket closed")
+    buff_list.append(chunk)
+    count += len(chunk)
+  return b"".join(buff_list)
+
+
 def rpc_receive_data(sock):
-  bs = sock.recv(8)
-  if not bs:
-    raise RpcCloseException("not get head data")
+  bs = safe_receive(sock, 8)
   if bs[:2] != b'wq':
     raise struct.error('wrong head:' + str(bs))
   idx, len_result = struct.unpack('<HI', bs[2:])
@@ -129,7 +144,11 @@ def read_string(data, idx):
   if str_len == 0:
     return None, idx + 2
   s = data[idx + 2:idx + str_len + 2]
-  return s.decode(), idx + 2 + str_len + 1
+  try:
+    s = s.decode()
+  except:
+    s = str(s)
+  return s, idx + 2 + str_len + 1
 
 
 def read_json(data, idx):

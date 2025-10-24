@@ -548,6 +548,7 @@ class AlbatrossDevice(object):
     return None
 
   app_inject_flags = InjectFlag.KEEP | InjectFlag.UNIX
+  app_albatross_init_flags = AlbatrossInitFlags.FLAG_INJECT | AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_LOG
 
   def on_launch_process(self, uid: int, pid: int, process_info: dict) -> byte:
     print(f'launch process {uid}:{pid}', process_info)
@@ -557,7 +558,7 @@ class AlbatrossDevice(object):
       self.app_launch_count[uid] = count + 1
       if count < self.max_launch_count:
         plugin_dex, plugin_lib, plugin_class, arg_str, arg_int = inject_record
-        self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int, AlbatrossInitFlags.FLAG_INJECT)
+        self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int, self.app_albatross_init_flags)
       else:
         return 0
     return 1
