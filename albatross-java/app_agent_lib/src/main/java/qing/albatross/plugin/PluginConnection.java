@@ -154,4 +154,8 @@ public class PluginConnection {
     instance = null;
   }
 
+  public boolean isLsposedInjected(){
+    return client.isLsposedInjected();
+  }
+
 }

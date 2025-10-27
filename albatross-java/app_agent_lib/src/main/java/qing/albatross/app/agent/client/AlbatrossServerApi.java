@@ -56,4 +56,5 @@ public interface AlbatrossServerApi {
 
   String uidProcesses(int uid, boolean onlyJava);
 
+  boolean isLsposedInjected();
 }

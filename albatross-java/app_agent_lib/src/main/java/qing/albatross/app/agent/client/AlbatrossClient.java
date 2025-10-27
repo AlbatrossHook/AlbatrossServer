@@ -43,7 +43,7 @@ public class AlbatrossClient extends UnixRpcClientInstance implements AlbatrossS
   public native byte addPluginRule(int pluginId, int appId);
 
   @Override
-  public native byte disablePlugin(int pid,int pluginId);
+  public native byte disablePlugin(int pid, int pluginId);
 
 
   @Override
@@ -53,7 +53,7 @@ public class AlbatrossClient extends UnixRpcClientInstance implements AlbatrossS
   public native String shell(String command);
 
   @Override
-  public native String uidProcesses(int uid,boolean onlyJava);
+  public native String uidProcesses(int uid, boolean onlyJava);
 
   @Override
   public native byte setAppAgent(String agentDex, String agentLib, String albatrossClass, String agentClass, String registerFunc, int albatrossInitFlags);
@@ -103,4 +103,7 @@ public class AlbatrossClient extends UnixRpcClientInstance implements AlbatrossS
     String stderr = s.substring(idx3 + 1);
     return new ShellExecResult(exitCode, stdout, stderr);
   }
+
+  @Override
+  public native boolean isLsposedInjected();
 }
