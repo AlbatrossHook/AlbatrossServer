@@ -98,6 +98,7 @@ public class DynamicPluginManager {
       for (String key : toRemoved) {
         pluginCache.remove(key);
       }
+      Albatross.unloadDex(dexClassLoader);
       return true;
     }
     return false;
