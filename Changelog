@@ -1,3 +1,8 @@
+version 3.1.0
+ - Optimize the sending of messages, add support for saving logs and redirecting app logs
+ - rpc adds parsing for long strings. Add a callback for successful injection into the app
+ - Optimize the test code and add exception catching
+
 version 2.1.0
  - Anti detection by remove the writable executable  memory fragments.
 
