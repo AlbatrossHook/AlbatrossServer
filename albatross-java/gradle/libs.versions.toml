@@ -4,3 +4,13 @@ minSdk = "24"
 targetSdk = "34"
 versionCode ="101"
 versionName = "1.1"
+javaVersion = "VERSION_17"
+agp = "8.12.3"
+kotlin = "2.2.20"
+
+[libraries]
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

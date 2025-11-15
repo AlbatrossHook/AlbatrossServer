@@ -1,6 +1,7 @@
 package qing.albatross.plugin.app;
 
 import android.app.Application;
+import android.widget.Toast;
 
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.core.Albatross;
@@ -49,5 +50,8 @@ public class DemoPlugin extends AlbatrossPlugin {
   @Override
   public void afterApplicationCreate(Application application) {
     Albatross.log("DemoPlugin afterApplicationCreate");
+    Albatross.getMainHandler().postDelayed(() -> {
+      Toast.makeText(application, "test app:" + application.getPackageManager(), Toast.LENGTH_LONG).show();
+    }, 4000);
   }
 }

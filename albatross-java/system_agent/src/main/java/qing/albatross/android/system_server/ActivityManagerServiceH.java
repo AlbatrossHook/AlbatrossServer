@@ -23,14 +23,14 @@ import android.util.SparseArray;
 
 import org.json.JSONObject;
 
-import qing.albatross.annotation.ExecOption;
+import qing.albatross.annotation.ExecutionOption;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
 import qing.albatross.core.Albatross;
 import qing.albatross.reflection.FieldDef;
 
-@TargetClass(className = "com.android.server.am.ActivityManagerService", hookerExec = ExecOption.DO_NOTHING)
+@TargetClass(className = "com.android.server.am.ActivityManagerService", hookerExec = ExecutionOption.DO_NOTHING)
 public class ActivityManagerServiceH {
 
 

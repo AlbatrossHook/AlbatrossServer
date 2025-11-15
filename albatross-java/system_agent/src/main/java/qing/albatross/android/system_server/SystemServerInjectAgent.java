@@ -93,7 +93,7 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
             throw new RuntimeException(e);
           }
         } else {
-          PluginMessage.enableMessage();
+          PluginMessage.registerPluginMethod();
         }
         if ((p2 & 1) != 0) {
           if (!server.init())
