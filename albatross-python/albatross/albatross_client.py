@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import struct
+import traceback
 from enum import IntEnum, IntFlag
 
 from .rpc_client import RpcClient, byte, read_string
 from .rpc_client import rpc_api, broadcast_api, void, ByteEnum
+from .wrapper import cached_class_property
 
 
 class InjectFlag(IntEnum):
@@ -44,7 +46,9 @@ class AlbatrossInitFlags(IntFlag):
   FLAG_INJECT = 0x800
   FLAG_INIT_RPC = 0x1000
   FLAG_CALL_CHAIN = 0x2000
+  FLAG_ANTI_DETECTION = 0x4000
   FLAG_LOG = 0x10000
+  REDIRECT_LOG = 0x20000
 
 
 class InjectResult(ByteEnum):
@@ -501,6 +505,38 @@ class AlbatrossClient(RpcClient):
         void: 无返回值
     """
     print(f'[*] process uid:{uid} pid:{pid} info: {process_info}')
+    callbacks = self.launch_callback.get(uid)
+    if callbacks:
+      self.invoke_callbacks(callbacks, uid, pid, process_info)
+
+  def invoke_callbacks(self, callbacks, uid, pid, process_info):
+    to_removed = []
+    for callback in callbacks:
+      try:
+        callback(uid, pid, process_info)
+      except Exception as e:
+        traceback.print_exc()
+        to_removed.append(callback)
+    for callback in to_removed:
+      callbacks.remove(callback)
+
+  @cached_class_property
+  def launch_callback(self):
+    return {}
+
+  def register_launch_callback(self, uid, callback):
+    launch_callbacks = self.launch_callback
+    if uid in launch_callbacks:
+      launch_callbacks[uid].append(callback)
+    else:
+      launch_callbacks[uid] = [callback]
+
+  def unregister_launch_callback(self, uid, callback):
+    launch_callbacks = self.launch_callback
+    if uid in launch_callbacks:
+      target_callbacks: list = launch_callbacks[uid]
+      if callback in target_callbacks:
+        target_callbacks.remove(callback)
 
   @rpc_api
   def patch_selinux(self) -> bool:
@@ -559,6 +595,10 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def shell(self, command: str) -> ShellExecResult:
+    pass
+
+  @rpc_api
+  def process_uid(self, pid: int) -> int:
     pass
 
   @staticmethod

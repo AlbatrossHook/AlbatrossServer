@@ -116,6 +116,7 @@ class AlbatrossDevice(object):
   lib_dir: str
   lib32_dir: str
   update_kill = True
+  update_kill_system_server = True
   lib32_dst: str
   max_launch_count = 20
   reconnect = True
@@ -158,6 +159,8 @@ class AlbatrossDevice(object):
   def is_screen_on(self):
     cmd = self.shellcmd + "dumpsys power"
     ret_str = run_shell(cmd)[1].decode("utf-8")
+    if 'Error' in ret_str:
+      return True
     if 'mWakefulness=' in ret_str:
       return 'mWakefulness=Awake' in ret_str
     match = re.search(r"Display Power: state=(\w+)", ret_str)
@@ -251,6 +254,10 @@ class AlbatrossDevice(object):
     if shell_root:
       self.root_shell = self.su_shell
     return shell_root
+
+  @cached_property
+  def debuggable(self):
+    return self.shell('getprop ro.debuggable') == '1'
 
   @cached_property
   def agent_dex(self):
@@ -432,6 +439,7 @@ class AlbatrossDevice(object):
     return client
 
   def restart_system_server(self):
+    print('try restart system server')
     self.root_shell('stop')
     time.sleep(0.5)
     self.root_shell('start')
@@ -454,6 +462,10 @@ class AlbatrossDevice(object):
       if not client.reconnect():
         cached_property.delete(self, "system_server_client")
 
+  @cached_property
+  def brand(self):
+    return self.shell('getprop ro.product.brand')
+
   system_server_address = None
 
   @cached_property
@@ -472,7 +484,7 @@ class AlbatrossDevice(object):
     client = self.client
     system_client_class = self.system_client_class_impl
     agent_dst = Configuration.system_server_agent_dst
-    if not self.is_selinux_on():
+    if self.is_selinux_on():
       client.patch_selinux()
     update = self.push_file(Configuration.system_server_agent_file, agent_dst, mode='444', file_type=self.file_type)
     if update:
@@ -548,7 +560,7 @@ class AlbatrossDevice(object):
     return None
 
   app_inject_flags = InjectFlag.KEEP | InjectFlag.UNIX
-  app_albatross_init_flags = AlbatrossInitFlags.FLAG_INJECT | AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_LOG
+  app_init_flags = AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_INIT_RPC
 
   def on_launch_process(self, uid: int, pid: int, process_info: dict) -> byte:
     print(f'launch process {uid}:{pid}', process_info)
@@ -558,7 +570,8 @@ class AlbatrossDevice(object):
       self.app_launch_count[uid] = count + 1
       if count < self.max_launch_count:
         plugin_dex, plugin_lib, plugin_class, arg_str, arg_int = inject_record
-        self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int, self.app_albatross_init_flags)
+        self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int,
+          AlbatrossInitFlags.FLAG_INJECT | self.app_init_flags)
       else:
         return 0
     return 1
@@ -594,14 +607,13 @@ class AlbatrossDevice(object):
       if update:
         self.create_dex_oat_dir(agent_dst)
         server_pid = client.get_process_pid('system_server')
-        if server_pid > 0 and client.is_injected(server_pid):
+        if self.update_kill_system_server and server_pid > 0 and client.is_injected(server_pid):
           self.restart_system_server()
           time.sleep(20)
       client.set_system_server_agent(agent_dst, Configuration.system_server_init_class, "system_server",
         AlbatrossInitFlags.NONE, None, 3)
       client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
-        Configuration.albatross_agent_class, Configuration.albatross_register_func,
-        AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_LOG)
+        Configuration.albatross_agent_class, Configuration.albatross_register_func, self.app_init_flags)
       if not client.patch_selinux():
         self.setenforce(False)
       return True
@@ -640,8 +652,10 @@ class AlbatrossDevice(object):
 
   def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.FLAG_LOG):
     client = self.client
+    uid = -1
     if isinstance(package_or_pid, str):
-      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
+      uid = self.get_package_uid(package_or_pid)
+      pids = client.get_java_processes_by_uid(uid)
     else:
       pids = [package_or_pid]
     success = []
@@ -650,6 +664,7 @@ class AlbatrossDevice(object):
       for pid in pids:
         res = client.inject_albatross(pid, self.app_inject_flags, None)
         if res >= 0:
+          success_count = 0
           for plugin in plugins:
             res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
               Configuration.albatross_agent_class, Configuration.albatross_register_func,
@@ -657,6 +672,14 @@ class AlbatrossDevice(object):
               plugin.plugin_flags)
             if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
               success.append((pid, plugin))
+              success_count += 1
+          if success_count:
+            if uid < 0:
+              uid = client.process_uid(pid)
+            callbacks = client.launch_callback.get(uid)
+            if callbacks:
+              client.invoke_callbacks(callbacks, uid, pid, None)
+
     return success
 
   def attach_with_plugin_ids(self, package_or_pid, plugins):
@@ -682,6 +705,17 @@ class AlbatrossDevice(object):
     client = self.client
     plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
     self.push_file(plugin_dex, plugin_dex_device, mode='444')
+    if plugin_lib:
+      assert os.path.exists(plugin_lib)
+      lib_name = os.path.basename(plugin_lib)
+      is_64 = '64' in plugin_lib
+      if is_64:
+        lib_dst = self.lib_dir + lib_name
+      else:
+        lib_dst = self.lib32_dir + lib_name
+      self.push_file(plugin_lib, lib_dst, file_type=self.file_type)
+      plugin_lib = lib_dst
+
     plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
     client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
     plugin.dex_device_dst = plugin_dex_device
@@ -723,7 +757,7 @@ class AlbatrossDevice(object):
     assert self.init_plugin_env
     uid = self.get_package_uid(target_package)
     client = self.client
-    client.add_plugin_rule(plugin.plugin_id, uid)
+    return client.add_plugin_rule(plugin.plugin_id, uid)
 
   def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
       plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE):
@@ -782,6 +816,21 @@ class AlbatrossDevice(object):
     if isinstance(port, int):
       port = 'tcp:' + str(port)
     run_shell(self.cmd + 'forward --remove ' + port)
+
+  def dumpui(self, path=None):
+    try:
+      ret_str = self.shell("uiautomator dump /data/local/tmp/uidump.xml")
+      if not ret_str.startswith("UI hierchary dumped to"):
+        return False
+      if path:
+        pull_cmd = self.cmd + "pull /data/local/tmp/uidump.xml {}".format(path)
+        run_shell(pull_cmd)
+        return True
+      else:
+        pull_cmd = self.shellcmd + " cat /data/local/tmp/uidump.xml"
+        return run_shell(pull_cmd)[1]
+    except:
+      return False
 
   def get_app_main_activities(self, pkg):
     cmd = self.shellcmd + " dumpsys package " + pkg

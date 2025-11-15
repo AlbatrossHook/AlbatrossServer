@@ -143,6 +143,12 @@ def read_string(data, idx):
   str_len = data[idx + 0] + (data[idx + 1] << 8)
   if str_len == 0:
     return None, idx + 2
+  if str_len == 0xffff:
+    assert len(data) - idx > 0xffff
+    for i in range(idx + 2 + 0xffff, len(data)):
+      if data[i] == b'\0':
+        str_len = i - idx - 2
+        break
   s = data[idx + 2:idx + str_len + 2]
   try:
     s = s.decode()
@@ -218,7 +224,10 @@ def put_bool(b: bool):
 
 def put_string(s: str):
   if s:
-    b_len = struct.pack('<H', len(s))
+    s_len = len(s)
+    if s_len > 0xffff:
+      s_len = 0xffff
+    b_len = struct.pack('<H', s_len)
     return b''.join([b_len, s.encode(), b'\0'])
   return b'\0\0'
 
@@ -311,7 +320,7 @@ class AlbRpcMethod(object):
     if parser:
       self.parser = parser
 
-  def __call__(self, *args, hint=None, timeout=None, silence=False, **kwargs):
+  def __call__(self, *args, hint=None, timeout=None, silence=False, raw=False, **kwargs):
     client = self.client
     method_name = self.name
     if client.prohibit_request:
@@ -381,7 +390,8 @@ class AlbRpcMethod(object):
         raise RpcCallException(err_fmt)
       pass
     if parser:
-      data = parser(data, result)
+      if not raw:
+        data = parser(data, result)
     elif data is None:
       data = result >= 0
     if not quiet:
