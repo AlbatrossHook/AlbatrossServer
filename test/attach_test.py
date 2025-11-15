@@ -15,31 +15,42 @@ def main(device_id=None):
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
 
+  app_init_flags = AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN
+  if not device.debuggable:
+    app_init_flags |= AlbatrossInitFlags.REDIRECT_LOG
   for pkg in user_pkgs:
-    if 'albatross' in pkg and 'inject_demo' not in pkg:
-      continue
+    # if 'albatross' in pkg and 'inject_demo' not in pkg:
+    #   continue
     uid = device.get_package_uid(pkg)
     print('try test', pkg)
     device.stop_app(pkg)
     device.start_app(pkg)
+    if not device.debuggable:
+      device.delete_file(f'/data/data/{pkg}/files/log')
     time.sleep(3)
-    pids = device.attach(pkg, plugin_dex, plugin_class,
-      init_flags=AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN)
+    try:
+      pids = device.attach(pkg, plugin_dex, plugin_class, init_flags=app_init_flags)
+    except Exception as e:
+      print(f'attach {pkg} fail:{e}')
+      continue
     if not pids:
       print(f'attach {pkg} fail')
       continue
     time.sleep(2)
     app_clients = []
     for pid in pids:
-      address = client.get_address(pid)
-      port = device.get_forward_port('localabstract:' + address)
-      app_client = AppClient(None, port, pkg + ":" + str(pid))
-      target_uid = app_client.getuid()
-      assert uid == target_uid
-      pkg_get = app_client.get_package_name()
-      assert pkg == pkg_get
-      app_client.create_subscriber()
-      app_clients.append((app_client, port))
+      try:
+        address = client.get_address(pid)
+        port = device.get_forward_port('localabstract:' + address)
+        app_client = AppClient(None, port, pkg + ":" + str(pid))
+        target_uid = app_client.getuid()
+        assert uid == target_uid
+        pkg_get = app_client.get_package_name()
+        assert pkg == pkg_get
+        app_client.create_subscriber()
+        app_clients.append((app_client, port))
+      except Exception as e:
+        print(f'attach {pkg} fail: {e} ')
     device.home()
     for i in range(3):
       device.switch_app()
