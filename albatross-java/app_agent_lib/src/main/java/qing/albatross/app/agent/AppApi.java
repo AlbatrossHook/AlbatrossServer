@@ -28,4 +28,14 @@ public interface AppApi {
   int hookMethod(String className, String methodName, int numArgs, String args, int dexPc);
 
   boolean unhookMethod(int listenerId);
+
+  String printAllClassLoader();
+
+  void seLogger(String logDir, String baseName, boolean cleanOld);
+
+  void flushLog();
+
+  boolean redirectAppLog(String fileName);
+
+  boolean finishRedirectAppLog();
 }

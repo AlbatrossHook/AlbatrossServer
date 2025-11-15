@@ -34,10 +34,16 @@ public abstract class AlbatrossPlugin {
     this.libName = libName;
   }
 
+  public void loadLibrary(String libName) {
+//    System.loadLibrary(libName); //The plugin only needs to remove the comments
+    throw new RuntimeException("Plugins containing the so library must implement the loadLibrary method");
+  }
+
+
   public boolean load(UnixRpcInstance agent) {
     try {
       if (libName != null)
-        System.loadLibrary(libName);
+        loadLibrary(libName);
       this.enable = true;
       return parseParams(params, flags);
     } catch (Throwable e) {
@@ -94,5 +100,7 @@ public abstract class AlbatrossPlugin {
 
   //native avoid inline
   public native void send(String msg, Throwable tr);
+
+  public native void log(String msg);
 
 }

@@ -15,7 +15,9 @@
  */
 package qing.albatross.app.agent;
 
+import static qing.albatross.agent.Const.CLEANUP_LOG;
 import static qing.albatross.agent.Const.FLAG_LOG;
+import static qing.albatross.agent.Const.REDIRECT_LOG;
 
 import android.annotation.SuppressLint;
 import android.app.Application;
@@ -31,7 +33,7 @@ import qing.albatross.agent.DynamicPluginManager;
 import qing.albatross.agent.PluginMessage;
 import qing.albatross.annotation.ConstructorBackup;
 import qing.albatross.annotation.ConstructorHook;
-import qing.albatross.annotation.ExecOption;
+import qing.albatross.annotation.ExecutionOption;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
@@ -43,6 +45,7 @@ import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.reflection.ReflectUtils;
 import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
+import qing.albatross.common.ThreadConfig;
 
 public class AppInjectAgent extends UnixRpcInstance implements AppApi, InstructionCallback {
 
@@ -59,9 +62,9 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
   @Override
   public void onEnter(Member method, Object self, int dexPc, InvocationContext invocationContext) {
     if (dexPc == 0)
-      PluginMessage.log("onEnter:" + method.getName(), new Exception(self == null ? "null" : self.toString()));
+      PluginMessage.send("onEnter:" + method.getName(), new Exception(self == null ? "null" : self.toString()));
     else
-      PluginMessage.log("M[" + dexPc + "] " + method.getName());
+      PluginMessage.send("M[" + dexPc + "] " + method.getName());
   }
 
   Map<Integer, InstructionListener> listeners = new HashMap<>();
@@ -98,20 +101,57 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     return false;
   }
 
+
+  @Override
+  public String printAllClassLoader() {
+    return Albatross.getClassLoaderList().toString();
+  }
+
+  @Override
+  public void seLogger(String logDir, String baseName, boolean cleanOld) {
+    PluginMessage.setLogger(logDir, baseName, cleanOld);
+  }
+
+  @Override
+  public void flushLog() {
+    PluginMessage.flushLog();
+  }
+
+  @Override
+  public boolean redirectAppLog(String fileName) {
+    return PluginMessage.redirectLog(fileName);
+  }
+
+  @Override
+  public boolean finishRedirectAppLog() {
+    if (PluginMessage.cancelRedirectLog()) {
+      PluginMessage.log("rollingLogger finish app log mark");
+      Albatross.log("Albatross.log finish app log mark");
+      return true;
+    }
+    return false;
+  }
+
+
+
+
   static class SingletonHolder {
     @SuppressLint("StaticFieldLeak")
     static AppInjectAgent instance = new AppInjectAgent();
   }
 
+  static int initFlags;
 
   public static boolean loadLibrary(int albatrossInitFlags, String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
-    Albatross.log("AppInjectAgent.loadLibrary");
+    initFlags = albatrossInitFlags;
+    ThreadConfig.notTraceMe();
+    Albatross.log("AppInjectAgent.loadLibrary:" + Albatross.currentProcessName());
     Albatross.initRpcClass(UnixRpcServer.class);
     AppInjectAgent injectEntry = AppInjectAgent.v();
     UnixRpcServer unixRpcServer = injectEntry.createServer(null, true);
     if (unixRpcServer == null) {
       Albatross.log("create server fail");
-      PluginMessage.enableMessage();
+      PluginMessage.registerPluginMethod();
     } else {
       if ((albatrossInitFlags & FLAG_LOG) != 0) {
         try {
@@ -119,15 +159,33 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
         } catch (Exception e) {
           throw new RuntimeException(e);
         }
+        if (Albatross.currentApplication() != null) {
+          appCreateInit("attach");
+        }
       } else {
-        PluginMessage.enableMessage();
+        PluginMessage.registerPluginMethod();
       }
     }
+
     return appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags) == 0;
   }
 
+  private static void appCreateInit(String logName) {
+    if ((initFlags & FLAG_LOG) != 0) {
+      if ((initFlags & REDIRECT_LOG) != 0) {
+        PluginMessage.redirectLog(logName + "_app");
+      }
+      PluginMessage.setLogger(null, logName + "_" + Albatross.currentProcessName(), (initFlags & CLEANUP_LOG) != 0);
+      Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+        Albatross.log("exception occur:" + t.getName(), e);
+        System.exit(1);
+      });
+    }
+  }
+
   public static int appendPlugin(String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
-    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags);
+    DynamicPluginManager instance = DynamicPluginManager.getInstance();
+    AlbatrossPlugin plugin = instance.appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags);
     if (plugin == null)
       return 1;
     Application application = Albatross.currentApplication();
@@ -169,11 +227,14 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     static void callApplicationOnCreate$Hook(Instrumentation instrumentation, Application app) {
       if (!isApplicationOnCreateCalled) {
         isApplicationOnCreateCalled = true;
+        appCreateInit("launch");
+        Albatross.syncAppClassLoader();
         Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
         for (AlbatrossPlugin plugin : pluginTable.values()) {
           plugin.beforeApplicationCreate(app);
         }
         callApplicationOnCreate(instrumentation, app);
+        Albatross.syncAppClassLoader();
         for (AlbatrossPlugin plugin : pluginTable.values()) {
           plugin.afterApplicationCreate(app);
         }
@@ -183,7 +244,7 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     }
   }
 
-  @TargetClass(targetExec = ExecOption.DO_NOTHING, hookerExec = ExecOption.DO_NOTHING)
+  @TargetClass(targetExec = ExecutionOption.DO_NOTHING, hookerExec = ExecutionOption.DO_NOTHING)
   static class InstrumentationConstructorHook {
     @ConstructorBackup
     static native void init$Backup(Instrumentation instrumentation);
@@ -212,4 +273,5 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
       throw new RuntimeException(e);
     }
   }
+
 }
