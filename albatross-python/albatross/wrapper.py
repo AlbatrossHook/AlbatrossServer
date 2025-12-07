@@ -15,7 +15,18 @@
 import threading
 import sys
 
-nil_value = object()
+
+def __get_nil():
+  class __NIL:
+    def __str__(self):
+      return "NIL"
+
+    __repr__ = __str__
+
+  return __NIL()
+
+
+nil_value = __get_nil()
 
 
 class cached_property(object):
@@ -97,6 +108,13 @@ class cached_class_property(object):
       delattr(cls, attr)
       return v
     return nil_value
+
+  @staticmethod
+  def try_get(cls, attr, default_value=nil_value):
+    if hasattr(cls, attr):
+      v = getattr(cls, attr)
+      return v
+    return default_value
 
   def __get__(self, obj, cls):
     func = self.func

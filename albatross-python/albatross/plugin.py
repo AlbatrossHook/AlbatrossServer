@@ -20,14 +20,15 @@ from .wrapper import cached_class_property
 
 class Plugin(object):
   dex_device_dst = None
+  plugin_updated = False
 
   @cached_class_property
   def plugin_tables(self):
     return {}
 
   @classmethod
-  def create(cls, plugin_dex: str, plugin_class: str, plugin_lib: str | None = None,
-      plugin_params: str = None, plugin_flags: int = 0):
+  def create(cls, plugin_dex: str, plugin_class: str, plugin_lib: str | None = None, plugin_params: str = None,
+      plugin_flags: int = 0):
     file_path_abs = os.path.abspath(plugin_dex)
     plugin_tables = cls.plugin_tables
     if file_path_abs in plugin_tables:
