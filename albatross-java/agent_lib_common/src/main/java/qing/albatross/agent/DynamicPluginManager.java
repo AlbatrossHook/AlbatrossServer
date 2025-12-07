@@ -30,6 +30,7 @@ public class DynamicPluginManager {
   Map<String, AlbatrossPlugin> pluginCache;
   Map<String, DexClassLoader> classLoaderCache;
 
+
   private DynamicPluginManager() {
     pluginCache = new HashMap<>();
     classLoaderCache = new HashMap<>();
@@ -37,6 +38,10 @@ public class DynamicPluginManager {
 
   public static DynamicPluginManager getInstance() {
     return Holder.INSTANCE;
+  }
+
+  public int getPluginSize() {
+    return pluginCache.size();
   }
 
   private static class Holder {
@@ -157,6 +162,7 @@ public class DynamicPluginManager {
       constructor.setAccessible(true);
       plugin = constructor.newInstance(libName, arguments, flags);
       pluginCache.put(pluginKey, plugin);
+      Albatross.log("load plugin " + plugin.pluginName() + " success");
       return plugin;
     } catch (Throwable e) {
       Albatross.log("Failed to load plugin: " + pluginClassName + " from " + pluginDexPath, e);

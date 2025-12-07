@@ -26,6 +26,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import qing.albatross.annotation.MethodHook;
 import qing.albatross.annotation.TargetClass;
+import qing.albatross.common.AppMetaInfo;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.UnixRpcInstance;
@@ -86,6 +87,10 @@ public class PluginMessage {
   static BufferedDailyRollingLogger rollingLogger;
   static BufferedDailyRollingLogger appLogger;
 
+  public static boolean isLogInit() {
+    return rollingLogger != null;
+  }
+
 
   static LinkedBlockingQueue<Object> messages = new LinkedBlockingQueue<>(8192);
 
@@ -131,6 +136,8 @@ public class PluginMessage {
   public static void appLog(String msg) {
     if (appLogger != null)
       appLogger.log(msg);
+    else if (rollingLogger != null)
+      rollingLogger.log(msg);
   }
 
   public static void send(String msg, Throwable tr) {
@@ -196,19 +203,24 @@ public class PluginMessage {
       }
     } else {
       try {
+        File logDirPath;
         Application context = Albatross.currentApplication();
         if (context == null) {
-          Albatross.log("can not create logger without application");
-          return;
+          if (AppMetaInfo.packageName == null) {
+            Albatross.log("can not create logger without application");
+            return;
+          }
+          logDirPath = new File("/data/data/" + AppMetaInfo.packageName + "/files/log");
+        } else {
+          File fieldDir = context.getFilesDir();
+          logDirPath = new File(fieldDir, "log");
         }
-        File fieldDir = context.getFilesDir();
-        File logFile = new File(fieldDir, "log");
-        if (logFile.exists()) {
+        if (logDirPath.exists()) {
           if (clean)
-            BufferedDailyRollingLogger.cleanupLogFiles(logFile, baseName);
+            BufferedDailyRollingLogger.cleanupLogFiles(logDirPath, baseName);
         } else
-          logFile.mkdirs();
-        rollingLogger = new BufferedDailyRollingLogger(logFile, baseName, LOG_MAX_FILE_SIZE);
+          logDirPath.mkdirs();
+        rollingLogger = new BufferedDailyRollingLogger(logDirPath, baseName, LOG_MAX_FILE_SIZE);
       } catch (IOException e) {
         Albatross.log("create log fail", e);
       }
@@ -250,10 +262,17 @@ public class PluginMessage {
     if (appLogger != null)
       return false;
     Application application = Albatross.currentApplication();
-    if (application == null)
-      return false;
+    File logDIr;
+    if (application == null) {
+      String packageName = AppMetaInfo.packageName;
+      if (packageName == null) {
+        return false;
+      }
+      logDIr = new File("/data/data/" + packageName + "/files/log");
+    } else {
+      logDIr = new File(application.getFilesDir(), "log");
+    }
     try {
-      File logDIr = new File(application.getFilesDir(), "log");
       if (!logDIr.exists())
         logDIr.mkdirs();
       appLogger = new BufferedDailyRollingLogger(logDIr, fileName + "_" + Albatross.currentProcessName(), 1024 * 1024 * 2);

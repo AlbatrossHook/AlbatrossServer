@@ -16,6 +16,7 @@
 package qing.albatross.agent;
 
 import android.app.Application;
+import android.content.Context;
 
 import qing.albatross.core.Albatross;
 import qing.albatross.server.UnixRpcInstance;
@@ -24,7 +25,7 @@ public abstract class AlbatrossPlugin {
 
   protected String params;
   protected int flags;
-  String libName;
+  protected String libName;
   protected boolean enable;
 
 
@@ -32,6 +33,10 @@ public abstract class AlbatrossPlugin {
     this.params = params;
     this.flags = flags;
     this.libName = libName;
+  }
+
+  public String pluginName() {
+    return this.getClass().getName();
   }
 
   public void loadLibrary(String libName) {
@@ -53,9 +58,19 @@ public abstract class AlbatrossPlugin {
     }
   }
 
-  abstract public void beforeApplicationCreate(Application application);
+  public void beforeApplicationCreate(Application application) {
+  }
+
 
   public void beforeMakeApplication() {
+  }
+
+  public void beforeNewApplication(ClassLoader cl, String className, Context context) {
+
+  }
+
+  public void afterNewApplication(Application application) {
+
   }
 
   public boolean parseParams(String params, int flags) {
@@ -78,7 +93,7 @@ public abstract class AlbatrossPlugin {
 
   public void disable() {
     this.enable = false;
-    Albatross.log("plugin " + this.getClass().getName() + " disable");
+    Albatross.log("plugin " + this.pluginName() + " disable");
     parseParams(null, 0);
   }
 
@@ -92,7 +107,8 @@ public abstract class AlbatrossPlugin {
   }
 
 
-  abstract public void afterApplicationCreate(Application application);
+  public void afterApplicationCreate(Application application) {
+  }
 
 
   // native avoid inline
