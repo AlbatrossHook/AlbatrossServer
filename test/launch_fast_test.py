@@ -4,6 +4,14 @@ import albatross
 from albatross.albatross_client import AlbatrossInitFlags
 from albatross.app_client import AppClient
 from albatross.common import Configuration
+from albatross.rpc_common import void, rpc_api
+
+
+class DemoClient(AppClient):
+
+  @rpc_api
+  def toast_msg(self, msg: str) -> void:
+    pass
 
 
 def main(device_id=None):
@@ -25,7 +33,11 @@ def main(device_id=None):
   client.create_subscriber()
   client.clear_plugins()
 
+  fail_launch_pkgs = set()
+
   for pkg in user_pkgs:
+    if pkg == 'com.coloros.backuprestore':
+      continue
     # if 'albatross' in pkg and 'inject_demo' not in pkg:
     #   continue
     print('try test', pkg)
@@ -45,7 +57,7 @@ def main(device_id=None):
         try:
           address = client.get_address(pid)
           port = device.get_forward_port('localabstract:' + address)
-          app_client = AppClient(None, port, pkg + ":" + str(pid))
+          app_client = DemoClient(port, None, pkg + ":" + str(pid))
           target_uid = app_client.getuid()
           assert uid == target_uid
           target_pkg = app_client.get_package_name()
@@ -53,12 +65,20 @@ def main(device_id=None):
           app_clients.append(app_client)
         except Exception as e:
           print(f'test app {pkg} fail:{e}')
+          fail_launch_pkgs.add(pkg)
       time.sleep(5)
       for app_client in app_clients:
-        app_client.close()
-        device.remove_forward_port(app_client.port)
+        try:
+          app_client.toast_msg('finish launch test:' + pkg)
+          app_client.close()
+          device.remove_forward_port(app_client.port)
+          time.sleep(1)
+        except:
+          fail_launch_pkgs.add(pkg)
   client.clear_plugins()
   print('finish test')
+  if fail_launch_pkgs:
+    print(f'fail to launch packages:{list(fail_launch_pkgs)}')
   device.remove_albatross_port()
   albatross.destroy()
 

@@ -8,7 +8,7 @@ import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.UnixRpcInstance;
 
-public class DemoPlugin extends AlbatrossPlugin {
+public class DemoPlugin extends AlbatrossPlugin implements DemoApi{
 
   public static String prefix = "activity";
 
@@ -27,6 +27,7 @@ public class DemoPlugin extends AlbatrossPlugin {
   @Override
   public boolean load(UnixRpcInstance agent) {
     Albatross.log("DemoPlugin load");
+    agent.registerApi(this, DemoApi.class);
     return super.load(agent);
   }
 
@@ -53,5 +54,11 @@ public class DemoPlugin extends AlbatrossPlugin {
     Albatross.getMainHandler().postDelayed(() -> {
       Toast.makeText(application, "test app:" + application.getPackageManager(), Toast.LENGTH_LONG).show();
     }, 4000);
+  }
+  @Override
+  public void toastMsg(String msg) {
+    Albatross.getMainHandler().post(() -> {
+      Toast.makeText(Albatross.currentApplication(), msg, Toast.LENGTH_SHORT).show();
+    });
   }
 }

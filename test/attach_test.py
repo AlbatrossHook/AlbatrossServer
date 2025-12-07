@@ -4,6 +4,14 @@ import albatross
 from albatross.albatross_client import AlbatrossInitFlags
 from albatross.app_client import AppClient
 from albatross.common import Configuration
+from albatross.rpc_common import rpc_api, void
+
+
+class DemoClient(AppClient):
+
+  @rpc_api
+  def toast_msg(self, msg: str) -> void:
+    pass
 
 
 def main(device_id=None):
@@ -42,7 +50,7 @@ def main(device_id=None):
       try:
         address = client.get_address(pid)
         port = device.get_forward_port('localabstract:' + address)
-        app_client = AppClient(None, port, pkg + ":" + str(pid))
+        app_client = DemoClient(port, None, pkg + ":" + str(pid))
         target_uid = app_client.getuid()
         assert uid == target_uid
         pkg_get = app_client.get_package_name()
@@ -58,6 +66,7 @@ def main(device_id=None):
       device.switch_app()
       time.sleep(2)
     for app_client, port in app_clients:
+      app_client.toast_msg('finish attach test:' + pkg)
       app_client.close()
       device.remove_forward_port(port)
   albatross.destroy()

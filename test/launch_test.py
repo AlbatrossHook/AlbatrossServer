@@ -8,6 +8,7 @@ from albatross.common import Configuration
 
 def main(device_id=None):
   print('launch mode is deprecated,use launch fast instead.')
+  sys.exit(1)
   device = albatross.get_device(device_id)
   assert device.is_root
   device.wake_up()
