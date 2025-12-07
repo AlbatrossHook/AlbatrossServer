@@ -1,3 +1,10 @@
+version 3.2.0
+ - The plugin adds callback methods beforeNewApplication and afterNewApplication
+ - Optimize the hook of the method instructions to implement the callbacks of the plugin-related methods before and after the creation of the application
+ - Add an example of a plugin rpc call
+ - Support obtaining configuration files by reading environment variables
+ - When registering a plugin, send the app package name and version information also
+
 version 3.1.0
  - Optimize the sending of messages, add support for saving logs and redirecting app logs
  - rpc adds parsing for long strings. Add a callback for successful injection into the app
