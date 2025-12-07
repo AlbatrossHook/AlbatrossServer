@@ -22,23 +22,30 @@ import static qing.albatross.agent.Const.REDIRECT_LOG;
 import android.annotation.SuppressLint;
 import android.app.Application;
 import android.app.Instrumentation;
+import android.content.Context;
 
 import java.lang.reflect.Member;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.agent.DynamicPluginManager;
 import qing.albatross.agent.PluginMessage;
 import qing.albatross.annotation.ConstructorBackup;
 import qing.albatross.annotation.ConstructorHook;
+import qing.albatross.annotation.DefOption;
 import qing.albatross.annotation.ExecutionOption;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
+import qing.albatross.annotation.StaticMethodHook;
 import qing.albatross.annotation.TargetClass;
+import qing.albatross.app.agent.client.StackManager;
+import qing.albatross.common.AppMetaInfo;
 import qing.albatross.core.Albatross;
-import qing.albatross.core.InstructionCallback;
 import qing.albatross.core.InstructionListener;
 import qing.albatross.core.InvocationContext;
 import qing.albatross.exception.AlbatrossErr;
@@ -47,7 +54,7 @@ import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
 import qing.albatross.common.ThreadConfig;
 
-public class AppInjectAgent extends UnixRpcInstance implements AppApi, InstructionCallback {
+public class AppInjectAgent extends UnixRpcInstance implements AppApi {
 
   public static AppInjectAgent v() {
     return SingletonHolder.instance;
@@ -56,44 +63,77 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
   private AppInjectAgent() {
   }
 
-  static final int CLASS_NO_FIND = -1;
-  static final int METHOD_NO_FIND = -2;
+  static final int HOOK_SUCCESS = 0;
+  static final int ALREADY_HOOK = 1;
+  static final int CLASS_NOT_FIND = -1;
+  static final int METHOD_NOT_FIND = -2;
+  static final int HOOK_FAIL = -3;
 
-  @Override
-  public void onEnter(Member method, Object self, int dexPc, InvocationContext invocationContext) {
-    if (dexPc == 0)
-      PluginMessage.send("onEnter:" + method.getName(), new Exception(self == null ? "null" : self.toString()));
-    else
-      PluginMessage.send("M[" + dexPc + "] " + method.getName());
+  static class AgentInstructionListener extends InstructionListener {
+
+    @Override
+    public void onEnter(Member method, Object self, int dexPc, InvocationContext invocationContext) {
+      if (dexPc == 0) {
+        Object[] args = invocationContext.getArguments();
+        if (args != null) {
+          Albatross.log("Enter:" + method.getName() + " " + Arrays.toString(args) + "\nstack:" + StackManager.getExceptionDesc(new Exception(ThreadConfig.myId())));
+        } else
+          Albatross.log("Enter:" + method.getName(), new Exception(ThreadConfig.myId()));
+      } else
+        Albatross.log("M[" + dexPc + "] " + method.getName() + ":" + invocationContext.smaliString());
+    }
   }
 
-  Map<Integer, InstructionListener> listeners = new HashMap<>();
-  int keyCount = 0;
+
+  Map<String, InstructionListener> listeners = new HashMap<>();
 
   @Override
-  public int hookMethod(String className, String methodName, int numArgs, String args, int dexPc) {
+  public String findMethod(String className, String methodName, int numArgs, String args) {
     Class<?> clz = Albatross.findClassFromApplication(className);
     if (clz == null) {
-      return CLASS_NO_FIND;
+      return "class not find";
     }
     if (args == null) {
       try {
         Method method = ReflectUtils.findDeclaredMethodWithCount(clz, methodName, numArgs);
-        InstructionListener listener = listeners.get(dexPc);
-        Albatross.hookInstruction(method, dexPc, this);
-        int key = keyCount++;
-        listeners.put(key, listener);
-        return key;
+        return Albatross.methodToString(method);
       } catch (NoSuchMethodException e) {
-        return METHOD_NO_FIND;
+        return "method not find";
       }
     }
-    return 0;
+    return "not support";
+
   }
 
   @Override
-  public boolean unhookMethod(int listenerId) {
-    InstructionListener listener = listeners.remove(listenerId);
+  public int hookMethod(String className, String methodName, int numArgs, String args, int minDexPc, int maxDexPc) {
+    Class<?> clz = Albatross.findClassFromApplication(className);
+    if (clz == null) {
+      return CLASS_NOT_FIND;
+    }
+    if (args == null) {
+      String key = className + "." + methodName + "|" + numArgs;
+      if (listeners.containsKey(key))
+        return ALREADY_HOOK;
+      try {
+        Method method = ReflectUtils.findDeclaredMethodWithCount(clz, methodName, numArgs);
+        AgentInstructionListener listener = new AgentInstructionListener();
+        boolean res = Albatross.hookInstruction(method, minDexPc, maxDexPc, listener);
+        if (!res)
+          return HOOK_FAIL;
+        listeners.put(key, listener);
+        return HOOK_SUCCESS;
+      } catch (NoSuchMethodException e) {
+        return METHOD_NOT_FIND;
+      }
+    }
+    return HOOK_FAIL;
+  }
+
+  @Override
+  public boolean unhookMethod(String className, String methodName, int numArgs, String args) {
+    String key = className + "." + methodName + "|" + numArgs;
+    InstructionListener listener = listeners.remove(key);
     if (listener != null) {
       listener.unHook();
       return true;
@@ -133,6 +173,27 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
   }
 
 
+  @Override
+  public String findClass(String className, boolean application) {
+    Class<?> clz;
+    if (application) {
+      clz = Albatross.findClassFromApplication(className);
+    } else {
+      clz = Albatross.findClass(className);
+    }
+    if (clz == null) {
+      return null;
+    }
+    return Objects.requireNonNull(clz.getClassLoader()).toString();
+  }
+
+  @Override
+  public String classLoaders(boolean sync) {
+    List<ClassLoader> classLoaders = Albatross.getClassLoaderList();
+    if (sync)
+      Albatross.syncAppClassLoader();
+    return classLoaders.toString();
+  }
 
 
   static class SingletonHolder {
@@ -140,15 +201,37 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     static AppInjectAgent instance = new AppInjectAgent();
   }
 
+  private static void resetExceptionHandler() {
+    Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
+      Albatross.log("exception occur:" + t.getName(), e);
+      System.exit(1);
+    });
+  }
+
+
   static int initFlags;
 
-  public static boolean loadLibrary(int albatrossInitFlags, String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
+  public static boolean loadLibrary(String extraInfo, int albatrossInitFlags, String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
     initFlags = albatrossInitFlags;
     ThreadConfig.notTraceMe();
-    Albatross.log("AppInjectAgent.loadLibrary:" + Albatross.currentProcessName());
     Albatross.initRpcClass(UnixRpcServer.class);
     AppInjectAgent injectEntry = AppInjectAgent.v();
     UnixRpcServer unixRpcServer = injectEntry.createServer(null, true);
+    Application application = Albatross.currentApplication();
+    if (application == null && extraInfo != null) {
+      try {
+        String[] ss = extraInfo.split(":");
+        AppMetaInfo.packageName = ss[0];
+        AppMetaInfo.versionCode = Integer.parseInt(ss[1]);
+//        initLog("launch");
+      } catch (Exception e) {
+        Albatross.log("parse app meta info fail", e);
+      }
+      Albatross.log("AppInjectAgent launch:" + AppMetaInfo.packageName);
+    } else {
+      Albatross.log("AppInjectAgent attach:" + Albatross.currentPackageName());
+    }
+    resetExceptionHandler();
     if (unixRpcServer == null) {
       Albatross.log("create server fail");
       PluginMessage.registerPluginMethod();
@@ -159,28 +242,29 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
         } catch (Exception e) {
           throw new RuntimeException(e);
         }
-        if (Albatross.currentApplication() != null) {
-          appCreateInit("attach");
+        if (application != null) {
+          appContextCreateInit("attach", application);
         }
       } else {
         PluginMessage.registerPluginMethod();
       }
     }
-
     return appendPlugin(pluginDexPath, pluginLibrary, className, pluginParams, pluginFlags) == 0;
   }
 
-  private static void appCreateInit(String logName) {
+  private static void initLog(String logName) {
     if ((initFlags & FLAG_LOG) != 0) {
       if ((initFlags & REDIRECT_LOG) != 0) {
         PluginMessage.redirectLog(logName + "_app");
       }
-      PluginMessage.setLogger(null, logName + "_" + Albatross.currentProcessName(), (initFlags & CLEANUP_LOG) != 0);
-      Thread.setDefaultUncaughtExceptionHandler((t, e) -> {
-        Albatross.log("exception occur:" + t.getName(), e);
-        System.exit(1);
-      });
+      PluginMessage.setLogger(null, logName + "_albatross_" + Albatross.currentProcessName(), (initFlags & CLEANUP_LOG) != 0);
     }
+  }
+
+  private static void appContextCreateInit(String logName, Context app) {
+    AppMetaInfo.fetchFromContext(app);
+    if (!PluginMessage.isLogInit())
+      initLog(logName);
   }
 
   public static int appendPlugin(String pluginDexPath, String pluginLibrary, String className, String pluginParams, int pluginFlags) {
@@ -191,6 +275,9 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     Application application = Albatross.currentApplication();
     if (application != null) {
       if (plugin.load(AppInjectAgent.v())) {
+        Class<? extends Application> applicationClass = application.getClass();
+        plugin.beforeNewApplication(applicationClass.getClassLoader(), applicationClass.getName(), application.getBaseContext());
+        plugin.afterNewApplication(application);
         plugin.beforeApplicationCreate(application);
         plugin.afterApplicationCreate(application);
       } else {
@@ -210,6 +297,7 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
 
 
   static boolean isApplicationOnCreateCalled = false;
+  static boolean isNewApplication = false;
 
 
   @Override
@@ -217,35 +305,105 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
     return AppApi.class;
   }
 
-  @TargetClass
+  @TargetClass(targetExec = ExecutionOption.DO_NOTHING, hookerExec = ExecutionOption.DO_NOTHING)
   static class InstrumentationHook {
 
-    @MethodBackup
+    @MethodBackup(option = DefOption.VIRTUAL)
+    private native static Application newApplication(Instrumentation instrumentation, ClassLoader cl, String className, Context context);
+
+    @MethodHook(option = DefOption.VIRTUAL)
+    public static Application newApplication$Hook(Instrumentation instrumentation, ClassLoader cl, String className, Context context) {
+      if (!isNewApplication) {
+        isNewApplication = true;
+        appContextCreateInit("launch", context);
+        Albatross.log("begin call plugin beforeNewApplication");
+        Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          try {
+            plugin.beforeNewApplication(cl, className, context);
+          } catch (Throwable e) {
+            Albatross.log("call " + plugin.pluginName() + " beforeNewApplication err", e);
+          }
+        }
+        Albatross.log("begin call app newApplication");
+        Application application = newApplication(instrumentation, cl, className, context);
+        Albatross.log("begin call plugin afterNewApplication");
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          try {
+            plugin.afterNewApplication(application);
+          } catch (Throwable e) {
+            Albatross.log("call " + plugin.pluginName() + " afterNewApplication err", e);
+          }
+        }
+        return application;
+      }
+      return newApplication(instrumentation, cl, className, context);
+    }
+
+    @MethodBackup(option = DefOption.VIRTUAL)
     static native void callApplicationOnCreate(Instrumentation instrumentation, Application app);
 
-    @MethodHook
+    @MethodHook(option = DefOption.VIRTUAL)
     static void callApplicationOnCreate$Hook(Instrumentation instrumentation, Application app) {
       if (!isApplicationOnCreateCalled) {
         isApplicationOnCreateCalled = true;
-        appCreateInit("launch");
         Albatross.syncAppClassLoader();
+        Albatross.log("begin call plugin beforeApplicationCreate");
         Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
         for (AlbatrossPlugin plugin : pluginTable.values()) {
           plugin.beforeApplicationCreate(app);
         }
+        Albatross.log("begin call app beforeApplicationCreate");
         callApplicationOnCreate(instrumentation, app);
         Albatross.syncAppClassLoader();
+        Albatross.log("begin call plugin afterApplicationCreate");
         for (AlbatrossPlugin plugin : pluginTable.values()) {
           plugin.afterApplicationCreate(app);
         }
       } else {
         callApplicationOnCreate(instrumentation, app);
       }
+      resetExceptionHandler();
     }
   }
 
   @TargetClass(targetExec = ExecutionOption.DO_NOTHING, hookerExec = ExecutionOption.DO_NOTHING)
   static class InstrumentationConstructorHook {
+
+
+    @StaticMethodHook(targetClass = Instrumentation.class)
+    static native Application newApplication(Class<?> clazz, Context context);
+
+    @StaticMethodHook(targetClass = Instrumentation.class)
+    public static Application newApplication$Hook(Class<?> clazz, Context context) {
+      if (!isNewApplication) {
+        isNewApplication = true;
+        appContextCreateInit("launch", context);
+        Albatross.log("begin call plugin beforeNewApplication from class");
+        Map<String, AlbatrossPlugin> pluginTable = DynamicPluginManager.getInstance().getPluginCache();
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          try {
+            plugin.beforeNewApplication(clazz.getClassLoader(), clazz.getName(), context);
+          } catch (Throwable e) {
+            Albatross.log("call " + plugin.pluginName() + " beforeNewApplication err", e);
+          }
+        }
+        Albatross.log("begin call app newApplication by class");
+        Application application = newApplication(clazz, context);
+        Albatross.log("begin call plugin afterNewApplication from class");
+        for (AlbatrossPlugin plugin : pluginTable.values()) {
+          try {
+            plugin.afterNewApplication(application);
+          } catch (Throwable e) {
+            Albatross.log("call " + plugin.pluginName() + " afterNewApplication err", e);
+          }
+        }
+        return application;
+      }
+      return newApplication(clazz, context);
+    }
+
+
     @ConstructorBackup
     static native void init$Backup(Instrumentation instrumentation);
 
@@ -273,5 +431,6 @@ public class AppInjectAgent extends UnixRpcInstance implements AppApi, Instructi
       throw new RuntimeException(e);
     }
   }
+
 
 }

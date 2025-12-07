@@ -25,9 +25,12 @@ public interface AppApi {
   void send(String content, String exception);
 
 
-  int hookMethod(String className, String methodName, int numArgs, String args, int dexPc);
+  String findMethod(String className, String methodName, int numArgs, String args);
 
-  boolean unhookMethod(int listenerId);
+
+  int hookMethod(String className, String methodName, int numArgs, String args, int minDexPc,int maxDexPc);
+
+  boolean unhookMethod(String className, String methodName, int numArgs, String args);
 
   String printAllClassLoader();
 
@@ -38,4 +41,8 @@ public interface AppApi {
   boolean redirectAppLog(String fileName);
 
   boolean finishRedirectAppLog();
+
+  String findClass(String className,boolean applicationLoader);
+
+  String classLoaders(boolean sync);
 }
