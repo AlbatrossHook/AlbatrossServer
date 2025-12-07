@@ -106,6 +106,8 @@ else:
 
 pkg_pattern = re.compile(r"package:([\w.]+)(?:\s+|$)")
 
+resume_activity_pattern = re.compile(r"mResumedActivity: ActivityRecord{\w+\s\w+\s([\w\.]+/[\w\.]+)")
+
 
 class AlbatrossDevice(object):
   anti_detection = True
@@ -157,8 +159,7 @@ class AlbatrossDevice(object):
 
   @property
   def is_screen_on(self):
-    cmd = self.shellcmd + "dumpsys power"
-    ret_str = run_shell(cmd)[1].decode("utf-8")
+    ret_str = self.run_as_shell("dumpsys power")
     if 'Error' in ret_str:
       return True
     if 'mWakefulness=' in ret_str:
@@ -168,7 +169,54 @@ class AlbatrossDevice(object):
 
   def wake_up(self):
     if not self.is_screen_on:
-      run_shell(self.shellcmd + "input keyevent 26")
+      self.run_as_shell("input keyevent 26")
+    else:
+      self.click(1, 1)
+
+  def click(self, x, y):
+    if x and y:
+      self.run_as_shell(f"input tap {x} {y}")
+      return True
+    return False
+
+  def screen_size(self, size=None):
+    if size is None:
+      cmd = self.shellcmd + "wm size"
+      lines: str = run_shell(cmd)[1].decode("utf-8")
+      lines = lines.rsplit(':', maxsplit=1)[-1]
+      width, height = re.findall("(\\d+)", lines)
+      return int(width), int(height)
+    else:
+      cmd = self.shellcmd + "wm size " + size
+      lines = run_shell(cmd)[1].decode("utf-8")
+      return lines
+
+  @cached_property
+  def swipe_direction(self):
+    x, y = self.screen_size()
+    halfX = x / 2
+    thirdX = x / 3
+    two_thirdX = thirdX * 2
+    halfY = y / 2
+    thirdY = y / 3
+    two_thirdY = thirdY * 2
+    dirdict = {
+      "left": (two_thirdX, halfY, thirdX, halfY),
+      "right": (thirdX, halfY, two_thirdX, halfY),
+      "up": (halfX, two_thirdY, halfX, thirdY),
+      "down": (halfX, thirdY, halfX, two_thirdY),
+    }
+    return dirdict
+
+  def swipe(self, x1, y1, x2, y2, time=None):
+    cmd = self.shellcmd + "input swipe {} {} {} {}".format(int(x1), int(y1), int(x2), int(y2))
+    if time:
+      cmd += " {}".format(time)
+    run_shell(cmd)
+
+  def swipe_to(self, direction='up'):
+    dirdict = self.swipe_direction
+    return self.swipe(*dirdict[direction])
 
   def check_alive(self):
     if not self.device_alive(1):
@@ -226,6 +274,20 @@ class AlbatrossDevice(object):
     result = ret[1].decode().strip()
     return result
 
+  def switch_shell_run(self, cmd, timeout=10):
+    on = self.is_selinux_on()
+    if on:
+      self.setenforce(False)
+    cmd = self.shellcmd + "'{} shell -c \"".format(self.su_file) + cmd + "\"'"
+    ret = run_shell(cmd, timeout=timeout)
+    self.ret_code = ret[0]
+    result = ret[1].decode().strip()
+    if on:
+      self.setenforce(True)
+    return result
+
+  run_as_shell = shell
+
   def is_shell_root(self):
     is_not_root = "Permission" in self.su_shell("touch /data/local/file_test")
     ret = "Permission" not in self.su_shell("rm /data/local/file_test")
@@ -249,6 +311,8 @@ class AlbatrossDevice(object):
     if adb_root:
       self.shell_user = 'root'
       self.root_shell = self.shell
+      if self.brand == 'realme':
+        self.run_as_shell = self.switch_shell_run
       return True
     shell_root = self.is_shell_root()
     if shell_root:
@@ -295,6 +359,7 @@ class AlbatrossDevice(object):
       extra_cmds.append(f'chown {owner}:{owner} {dst}')
     if not md5_dst:
       return False
+    md5_current = False
     if check or os.stat(file).st_size > 8192:
       if dst[-1] == "/":
         dst += os.path.basename(file)
@@ -303,7 +368,7 @@ class AlbatrossDevice(object):
         if extra_cmds:
           self.root_shell(';'.join(extra_cmds))
         return False
-    if self.shell_user == 'shell':
+    if self.shell_user == 'shell' and md5_current is not None:
       self.delete_file(dst)
     command = self.cmd + ' push "{}" "{}"'.format(file, dst)
     ret_code, s = run_shell(command)
@@ -404,15 +469,16 @@ class AlbatrossDevice(object):
     lib_src_32 = None
     if abi_lib32 and self.support_32:
       lib_src_32, abi32_name = abi_lib32
-      self.lib32_dir = Configuration.lib_path + abi32_name + "/"
-      lib_dst_32 = self.lib32_dir + lib_name
-      self.push_file(lib_src_32, lib_dst_32, mode='644', file_type=self.file_type)
-      self.lib32_dst = lib_dst_32
+      if os.path.exists(lib_src_32):
+        self.lib32_dir = Configuration.lib_path + abi32_name + "/"
+        lib_dst_32 = self.lib32_dir + lib_name
+        self.push_file(lib_src_32, lib_dst_32, mode='644', file_type=self.file_type)
+        self.lib32_dst = lib_dst_32
     if update and self.update_kill:
       self.kill_process(os.path.basename(server_dst_path))
     else:
       try:
-        client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
+        client = AlbatrossClient(local_port, '127.0.0.1', 'albatross-' + self.device_id, 500)
         client.set_arch_lib(self.lib_dst)
         if lib_dst_32:
           client.set_2nd_arch_lib(self.lib32_dst)
@@ -430,7 +496,7 @@ class AlbatrossDevice(object):
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
     time.sleep(2)
     process.terminate()
-    client = AlbatrossClient('127.0.0.1', local_port, 'albatross-' + self.device_id, 500)
+    client = AlbatrossClient(local_port, '127.0.0.1', 'albatross-' + self.device_id, 500)
     client.set_arch_lib(self.lib_dst)
     if lib_dst_32:
       client.set_2nd_arch_lib(self.lib32_dst)
@@ -471,7 +537,7 @@ class AlbatrossDevice(object):
   @cached_property
   def system_server_subscriber(self) -> SystemServerClient:
     port = self.get_forward_port(self.system_server_address)
-    subscribe_client = SystemServerClient('127.0.0.1', port, 'system-' + self.device_id)
+    subscribe_client = SystemServerClient(port, '127.0.0.1', 'system-' + self.device_id)
     subscribe_client.set_on_close_listener(self.on_system_subscribe_close)
     subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
     subscribe_client.subscribe()
@@ -512,10 +578,10 @@ class AlbatrossDevice(object):
       system_server_address = 'localabstract:' + system_server_address
       self.system_server_address = system_server_address
       port = self.get_forward_port(system_server_address)
-      system_server = system_client_class('127.0.0.1', port, 'system-' + self.device_id)
+      system_server = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
       system_server.init()
       system_server.set_on_close_listener(self.on_system_client_close)
-      subscribe_client = system_client_class('127.0.0.1', port, 'system-' + self.device_id)
+      subscribe_client = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
       subscribe_client.set_on_close_listener(self.on_system_subscribe_close)
       subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
       subscribe_client.subscribe()
@@ -571,7 +637,7 @@ class AlbatrossDevice(object):
       if count < self.max_launch_count:
         plugin_dex, plugin_lib, plugin_class, arg_str, arg_int = inject_record
         self.attach(pid, plugin_dex, plugin_class, plugin_lib, arg_str, arg_int,
-          AlbatrossInitFlags.FLAG_INJECT | self.app_init_flags)
+          self.app_init_flags | AlbatrossInitFlags.FLAG_INJECT)
       else:
         return 0
     return 1
@@ -633,7 +699,9 @@ class AlbatrossDevice(object):
     self.push_file(plugin_dex, plugin_dex_device, mode='444')
     plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
     client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
-    client.add_plugin_rule(plugin.plugin_id, uid)
+    res = client.add_plugin_rule(plugin.plugin_id, uid)
+    if res == SetResult.MISS_INFO:
+      client.set_app_info(uid, target_package + ":" + str(self.get_package_version_code(target_package)))
     self.stop_app(target_package)
     self.start_app(target_package)
     return True
@@ -645,12 +713,14 @@ class AlbatrossDevice(object):
     client = self.client
     for plugin in plugins:
       res = client.add_plugin_rule(plugin.plugin_id, uid)
-      if res not in [SetResult.SET_OK, SetResult.SET_ALREADY]:
+      if res == SetResult.MISS_INFO:
+        client.set_app_info(uid, target_package + ":" + str(self.get_package_info(target_package)))
+      elif res not in [SetResult.SET_OK, SetResult.SET_ALREADY]:
         return False
     self.start_app(target_package)
     return True
 
-  def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.FLAG_LOG):
+  def attach_with_plugins(self, package_or_pid, plugins, init_flags=AlbatrossInitFlags.FLAG_LOG, extra_info=None):
     client = self.client
     uid = -1
     if isinstance(package_or_pid, str):
@@ -668,8 +738,8 @@ class AlbatrossDevice(object):
           for plugin in plugins:
             res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
               Configuration.albatross_agent_class, Configuration.albatross_register_func,
-              init_flags, plugin.dex_device_dst, plugin.plugin_lib, plugin.plugin_class, plugin.plugin_params,
-              plugin.plugin_flags)
+              init_flags, extra_info, plugin.dex_device_dst, plugin.plugin_lib, plugin.plugin_class,
+              plugin.plugin_params, plugin.plugin_flags)
             if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
               success.append((pid, plugin))
               success_count += 1
@@ -704,7 +774,7 @@ class AlbatrossDevice(object):
     assert os.path.exists(plugin_dex)
     client = self.client
     plugin_dex_device = Configuration.app_plugin_home + os.path.basename(plugin_dex)
-    self.push_file(plugin_dex, plugin_dex_device, mode='444')
+    is_update = self.push_file(plugin_dex, plugin_dex_device, mode='444', check=True)
     if plugin_lib:
       assert os.path.exists(plugin_lib)
       lib_name = os.path.basename(plugin_lib)
@@ -713,12 +783,14 @@ class AlbatrossDevice(object):
         lib_dst = self.lib_dir + lib_name
       else:
         lib_dst = self.lib32_dir + lib_name
-      self.push_file(plugin_lib, lib_dst, file_type=self.file_type)
+      is_update += self.push_file(plugin_lib, lib_dst, file_type=self.file_type, check=True)
       plugin_lib = lib_dst
 
     plugin = Plugin.create(plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
     client.register_plugin(plugin.plugin_id, plugin_dex_device, plugin_lib, plugin_class, plugin_params, plugin_flags)
     plugin.dex_device_dst = plugin_dex_device
+    if is_update:
+      plugin.plugin_updated = True
     return plugin
 
   def reload_plugin(self, plugin: Plugin):
@@ -757,10 +829,15 @@ class AlbatrossDevice(object):
     assert self.init_plugin_env
     uid = self.get_package_uid(target_package)
     client = self.client
-    return client.add_plugin_rule(plugin.plugin_id, uid)
+    res = client.add_plugin_rule(plugin.plugin_id, uid)
+    if res == SetResult.MISS_INFO:
+      extra_info = target_package + ":" + str(self.get_package_version_code(target_package))
+      client.set_app_info(uid, extra_info)
+      return SetResult.SET_OK
+    return res
 
   def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
-      plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE):
+      plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE, extra_info=None):
     client = self.client
     if isinstance(package_or_pid, str):
       pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
@@ -788,7 +865,7 @@ class AlbatrossDevice(object):
           time.sleep(1)
           res = client.load_plugin(pid, agent_dex, None, Configuration.albatross_class_name,
             Configuration.albatross_agent_class, Configuration.albatross_register_func,
-            init_flags, plugin_dex_device, lib_dst_device, plugin_class, plugin_params,
+            init_flags, extra_info, plugin_dex_device, lib_dst_device, plugin_class, plugin_params,
             plugin_flags)
           if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
             success.append(pid)
@@ -833,9 +910,7 @@ class AlbatrossDevice(object):
       return False
 
   def get_app_main_activities(self, pkg):
-    cmd = self.shellcmd + " dumpsys package " + pkg
-    _, ret_bs = run_shell(cmd)
-    ret_str = ret_bs.decode("utf-8")
+    ret_str = self.run_as_shell("dumpsys package " + pkg)
     res = ret_str.split("android.intent.action.MAIN:")
     if len(res) > 1:
       str_list = (re.match("(\\s+[\\da-f]+\\s+[\\w/.]+)+", res[1]).group(0).strip().split())
@@ -844,22 +919,73 @@ class AlbatrossDevice(object):
     return []
 
   def start_activity(self, pkg_activity, action=None):
-    command = self.cmd + "shell am start -n {}".format(pkg_activity)
+    command = "am start -n {}".format(pkg_activity)
     if action:
       command += ' -a ' + action
     # command = self.cmd + 'shell am start -n {}/{}'.format(pkg_name, activity)
-    ret_code, ret_str = run_shell(command, timeout=None)
-    if ret_code == 0 and b"Error" not in ret_str:
+    ret_str = self.run_as_shell(command)
+    if self.ret_code == 0 and "Error" not in ret_str:
       return True
     else:
       return False
 
   def stop_app(self, target_package):
-    command = self.shellcmd + "am force-stop " + target_package
-    ret_code, _ = run_shell(command)
-    if ret_code == 0:
+    command = self.run_as_shell("am force-stop " + target_package)
+    if self.ret_code == 0:
       return True
     return False
+
+  def get_package_info(self, package):
+    info_string = self.run_as_shell("dumpsys package " + package)
+    if "Unable to find" in info_string:
+      return None
+    if 'Error with' in info_string:
+      return None
+    attrs = [
+      "(?:userId|appId)",
+      "versionCode",
+      "minSdk",
+      "targetSdk",
+      "versionName",
+      "dataDir",
+      # 'package',
+    ]
+    result = {}
+    for attr in attrs:
+      val = re.search(attr + "=(\\S*)", info_string).groups()[0]
+      if attr == "(?:userId|appId)":
+        attr = 'uid'
+      result[attr] = val
+    return result
+
+  def package_apk_path(self, package):
+    package_pattern = re.compile("package:(\\S+)")
+    package_strs = self.shell("pm path " + package)
+    return package_pattern.findall(package_strs)
+
+  def dump_apk(self, package, output_path, overwrite=False):
+    if not output_path.endswith(".apk"):
+      package_info = self.get_package_info(package)
+      versionName = package_info["versionName"]
+      output_path = os.path.join(output_path, package + "_" + versionName + ".apk")
+    paths = self.package_apk_path(package)
+    if len(paths) == 1:
+      dir_path = os.path.dirname(output_path)
+      if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+      if not os.path.exists(output_path) or overwrite:
+        self.pull_file(paths[0], output_path)
+      return output_path
+    else:
+      if not os.path.exists(output_path):
+        os.makedirs(output_path)
+      elif not overwrite:
+        return output_path.rstrip('/')
+      if output_path[-1] != '/':
+        output_path += "/"
+      for path in paths:
+        self.pull_file(path, output_path)
+    return output_path[-1:]
 
   def start_app(self, target_package):
     activities = self.get_app_main_activities(target_package)
@@ -875,9 +1001,9 @@ class AlbatrossDevice(object):
 
   def get_user_packages(self, include_disabled=False):
     if include_disabled:
-      pkgs = self.shell('pm list packages -3')
+      pkgs = self.run_as_shell('pm list packages -3')
     else:
-      pkgs = self.shell('pm list packages -3 -e')
+      pkgs = self.run_as_shell('pm list packages -3 -e')
     return pkg_pattern.findall(pkgs)
 
   def home(self):
@@ -895,6 +1021,39 @@ class AlbatrossDevice(object):
       return sdk
     except:
       return None
+
+  base_activity_pattern = re.compile(
+    r"Run\s#\d+:\sActivityRecord{\w+\s\w+\s([\w\.]+/[\w\.]+)"
+  )
+
+  def get_activity_stack(self, pkg=None):
+    cmd = self.cmd + 'shell " dumpsys activity | grep -i run"'
+    _, rstr = run_shell(cmd)
+    if b"Illegal" in rstr:
+      _, rstr = run_shell(cmd)
+    rstr = rstr.decode("utf-8")
+    if pkg:
+      pattern = re.compile(
+        r"Run\s#\d+:\sActivityRecord{\w+\s\w+\s(%s/[\w\.]+)" % (pkg)
+      )
+    else:
+      pattern = self.base_activity_pattern
+    result = pattern.findall(rstr)
+    return result
+
+  def top_app(self):
+    res = self.shell("dumpsys window | grep mCurrentFocus")
+    if res:
+      result = re.findall('([\w.]+)/([\w.]+)', res)
+      if result:
+        return result[0]
+    stack = self.get_activity_stack()
+    if not stack:
+      cmd = self.cmd + 'shell " dumpsys activity | grep -i mResumedActivity"'
+      _, rstr = run_shell(cmd)
+      stack = resume_activity_pattern.findall(rstr.decode())
+    top_stack = stack[0].split("/")
+    return top_stack[0], top_stack[1]
 
   def pull_file(self, src_android, dst_pc, is_del=False):
     command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)
@@ -929,9 +1088,9 @@ class AlbatrossDevice(object):
       return False
 
   def screenshot(self, path):
-    command = self.shellcmd + "screencap -p  /sdcard/screen.png"
-    ret_code, _ = run_shell(command)
-    if ret_code != 0:
+    command = "screencap -p  /sdcard/screen.png"
+    self.run_as_shell(command)
+    if self.ret_code:
       return False
     dirpath = os.path.dirname(path)
     if dirpath and not os.path.exists(dirpath):
@@ -939,9 +1098,15 @@ class AlbatrossDevice(object):
     return self.pull_file("/sdcard/screen.png", path)
 
   def get_package_uid(self, pkg):
-    cmd = self.shellcmd + 'dumpsys package ' + pkg
-    ret_str = run_shell(cmd)[1].decode("utf-8")
+    ret_str = self.run_as_shell('dumpsys package ' + pkg)
     res = re.findall(r'\s+(?:appId|uid|userId)=(\d+)', ret_str)
+    if res:
+      return int(res[0])
+    return None
+
+  def get_package_version_code(self, pkg):
+    ret_str = self.run_as_shell('dumpsys package ' + pkg)
+    res = re.findall(r'\s+versionCode=(\d+)', ret_str)
     if res:
       return int(res[0])
     return None
