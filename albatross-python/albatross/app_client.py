@@ -1,6 +1,27 @@
-from enum import IntFlag
+# Copyright 2025 QingWan (qingwanmail@foxmail.com)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from enum import IntEnum
 
 from albatross.rpc_client import RpcClient, rpc_api, void, broadcast_api
+
+
+class InsHookResult(IntEnum):
+  HOOK_SUCCESS = 0
+  ALREADY_HOOK = 1
+  CLASS_NOT_FIND = -1
+  METHOD_NOT_FIND = -2
+  HOOK_FAIL = -3
 
 
 class AppClient(RpcClient):
@@ -24,7 +45,12 @@ class AppClient(RpcClient):
     """
 
   @rpc_api
-  def hook_method(self, class_name: str, method_name: str, num_args: int, args: str, dex_pc: int) -> int:
+  def find_method(self, class_name: str, method_name: str, num_args: int, args: str = None) -> str:
+    pass
+
+  @rpc_api
+  def hook_method(self, class_name: str, method_name: str, num_args: int, args: str = None,
+      min_dex_pc: int = 0, max_dex_pc: int = 128) -> InsHookResult:
     """
     钩子方法，用于拦截和修改方法调用
 
@@ -33,19 +59,17 @@ class AppClient(RpcClient):
         method_name (str): 方法名
         num_args (int): 参数数量
         args (str): 参数信息
-        dex_pc (int): DEX程序计数器
+        min_dex_pc (int): 最小的DEX程序计数器
+        max_dex_pc (int): 最大的DEX程序计数器
 
     Returns:
         int: 监听器ID
     """
 
   @rpc_api
-  def unhook_method(self, listener_id: int) -> bool:
+  def unhook_method(self, class_name: str, method_name: str, num_args: int, args: str = None) -> bool:
     """
     取消方法钩子
-
-    Args:
-        listener_id (int): 监听器ID
 
     Returns:
         bool: 是否成功取消钩子

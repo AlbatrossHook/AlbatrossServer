@@ -91,6 +91,7 @@ class SetResult(ByteEnum):
   SYSTEM_SERVER_ERR = 3
   DATA_ERR = 4
   SET_CHANGE = 5
+  MISS_INFO = 6
 
 
 class ShellExecResult(object):
@@ -220,8 +221,16 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
+  def set_app_info(self, uid: int, info: str | None) -> void:
+    pass
+
+  @rpc_api
+  def get_app_info(self, uid: int) -> str:
+    pass
+
+  @rpc_api
   def load_plugin(self, pid: int, app_agent_dex: str, agent_lib: str | None, albatross_class: str, agent_class: str,
-      agent_register_func: str, flags: AlbatrossInitFlags, plugin_dex: str, plugin_lib: str,
+      agent_register_func: str, flags: AlbatrossInitFlags, extra_info: str | None, plugin_dex: str, plugin_lib: str,
       plugin_class: str, plugin_params: str, plugin_flags: int) -> DexLoadResult:
     """
     加载插件到指定进程
@@ -317,7 +326,7 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
-  def clear_plugins(self) -> int:
+  def clear_plugins(self, affect_exist: bool = False) -> int:
     """
     清除所有插件
 

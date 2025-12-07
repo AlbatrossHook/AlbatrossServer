@@ -87,6 +87,10 @@ class Configuration(object):
 
   @cached_class_property
   def config(self):
+    config_path = os.environ.get('ALBATROSS_CONFIG', None)
+    if config_path and os.path.exists(config_path):
+      with open(config_path) as fp:
+        return toml.load(fp)
     current_dir = os.path.dirname(__file__)
     local_config = current_dir + '/albatross_config_local.toml'
     if os.path.exists(local_config):
