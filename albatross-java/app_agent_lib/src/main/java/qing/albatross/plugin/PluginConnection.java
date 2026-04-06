@@ -15,13 +15,15 @@
  */
 package qing.albatross.plugin;
 
+import static qing.albatross.app.agent.client.Const.MISS_INFO;
+
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 
-import qing.albatross.app.agent.AppInjectAgent;
 import qing.albatross.app.agent.client.AlbatrossClient;
 import qing.albatross.app.agent.client.Const;
+import qing.albatross.app.agent.AppInjectAgent;
 import qing.albatross.app.agent.client.DisconnectException;
 import qing.albatross.app.agent.client.ShellExecResult;
 import qing.albatross.core.Albatross;
@@ -107,11 +109,24 @@ public class PluginConnection {
   public byte addPluginRule(int pluginId, String pkg) {
     try {
       if (Const.PKG_SYSTEM_SERVER.equals(pkg)) {
-        return client.addPluginRule(pluginId, Const.SYSTEM_UID);
+        return client.addPluginRule(pluginId, Const.SYSTEM_UID, null);
       } else {
         ApplicationInfo applicationInfo = Albatross.currentApplication().getPackageManager().getApplicationInfo(pkg, 0);
         int uid = applicationInfo.uid;
-        return client.addPluginRule(pluginId, uid);
+        byte res;
+        if (Const.SYSTEM_UID == uid) {
+          res = client.addPluginRule(pluginId, uid, pkg);
+        } else {
+          res = client.addPluginRule(pluginId, uid, null);
+        }
+        if (res == MISS_INFO) {
+          PackageInfo packageInfo = Albatross.currentApplication().getPackageManager().getPackageInfo(pkg, 0);
+          int versionCode = packageInfo.versionCode;
+          String extraInfo = pkg + ":" + versionCode;
+          client.setAppInfo(applicationInfo.uid, extraInfo);
+          res = 0;
+        }
+        return res;
       }
     } catch (PackageManager.NameNotFoundException e) {
       return 0;
@@ -120,7 +135,11 @@ public class PluginConnection {
 
 
   public byte deletePlugin(int pluginId) {
-    return client.deletePlugin(pluginId);
+    return client.deletePlugin(pluginId, false);
+  }
+
+  public void setAppInfo(int uid, String extraInfo) {
+    client.setAppInfo(uid, extraInfo);
   }
 
   public void stopServer() {
@@ -154,7 +173,7 @@ public class PluginConnection {
     instance = null;
   }
 
-  public boolean isLsposedInjected(){
+  public boolean isLsposedInjected() {
     return client.isLsposedInjected();
   }
 
