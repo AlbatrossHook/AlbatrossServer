@@ -28,7 +28,7 @@ public interface AppApi {
   String findMethod(String className, String methodName, int numArgs, String args);
 
 
-  int hookMethod(String className, String methodName, int numArgs, String args, int minDexPc,int maxDexPc);
+  int hookMethod(String className, String methodName, int numArgs, String args, int minDexPc, int maxDexPc, boolean safeToString);
 
   boolean unhookMethod(String className, String methodName, int numArgs, String args);
 
