@@ -15,19 +15,25 @@
  */
 package qing.albatross.android.system_server;
 
+import static android.os.Process.SYSTEM_UID;
+import static qing.albatross.agent.Const.DEX_LOAD_FAIL;
 import static qing.albatross.agent.Const.FLAG_LOG;
 
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;
+import android.app.AppOpsManager;
 import android.app.Application;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.os.Binder;
 import android.os.Build;
+import android.os.IInterface;
 import android.os.UserHandle;
 
 import java.util.HashMap;
@@ -37,6 +43,7 @@ import java.util.Map;
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.agent.DynamicPluginManager;
 import qing.albatross.agent.PluginMessage;
+import qing.albatross.common.AppMetaInfo;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.JsonFormatter;
@@ -46,11 +53,20 @@ import qing.albatross.server.UnixRpcServer;
 
 public class SystemServerInjectAgent extends UnixRpcInstance implements SystemServerApi {
 
+  public static final int AGENT_VERSION = 1;
+
+  public static final String NO_FILTER = ":A";
+  public static final String SPLIT = ":";
+
   static Map<Integer, String> interceptApps = new HashMap<>();
+
+  static Map<Integer, String> watchApps = new HashMap<>();
   static boolean interceptAll = false;
 
-  public static boolean shouldInterceptUid(int callingUid) {
-    return (interceptAll || interceptApps.containsKey(callingUid));
+  public static String shouldInterceptUid(int callingUid) {
+    if (interceptAll)
+      return NO_FILTER;
+    return interceptApps.get(callingUid);
   }
 
 
@@ -84,6 +100,8 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
         Albatross.initRpcClass(UnixRpcServer.class);
       SystemServerInjectAgent server = SystemServerInjectAgent.v();
       UnixRpcServer unixRpcServer = server.createServer(p1, true);
+      AppMetaInfo.versionCode = Build.VERSION.SDK_INT;
+      AppMetaInfo.packageName = "system_server";
       if (unixRpcServer != null) {
         server.context = Albatross.currentApplication();
         if ((albatrossInitFlags & FLAG_LOG) != 0) {
@@ -154,13 +172,13 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
 
 
   @Override
-  public native byte launchProcess(int uid, int pid, String data);
+  public native byte launchProcess(int uid, int pid, String pkg, String processName, String data);
 
 
-  public void notifyProcessLaunch(int uid, int pid, String data) {
-    byte ret = launchProcess(uid, pid, data);
-    if (ret == 0) {
-      removeIntercept(uid);
+  public void notifyProcessLaunch(int uid, int pid, String pkg, String processName, String data) {
+    byte ret = launchProcess(uid, pid, pkg, processName, data);
+    if (ret == -1) {
+      removeIntercept(uid, pkg);
     }
   }
 
@@ -323,6 +341,7 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
     return count;
   }
 
+
   @Override
   public boolean init() {
     if (activityManager != null)
@@ -375,7 +394,19 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
       ApplicationInfo appInfo;
       appInfo = packageManager.getApplicationInfo(pkg, PackageManager.GET_META_DATA);
       int uid = appInfo.uid;
-      interceptApps.put(uid, pkg);
+      if (uid <= SYSTEM_UID) {
+        String pkgs = interceptApps.get(uid);
+        String insert_item = SPLIT + pkg;
+        if (pkgs != null) {
+          if (!pkgs.contains(insert_item)) {
+            pkgs += insert_item;
+            interceptApps.put(uid, pkgs);
+          }
+        } else {
+          interceptApps.put(uid, insert_item);
+        }
+      } else
+        interceptApps.put(uid, pkg);
       return uid;
     } catch (PackageManager.NameNotFoundException e) {
       Albatross.log("setInterceptApp fail", e);
@@ -384,13 +415,54 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
   }
 
   @Override
-  public void setIntercept(int uid) {
-    interceptApps.put(uid, "intercept");
+  public int addWatchApp(String packageName, boolean clear) {
+    if (clear)
+      watchApps.clear();
+    PackageManager packageManager = context.getPackageManager();
+    ApplicationInfo appInfo;
+    try {
+      appInfo = packageManager.getApplicationInfo(packageName, 0);
+    } catch (PackageManager.NameNotFoundException e) {
+      return -1;
+    }
+    int uid = appInfo.uid;
+    watchApps.put(uid, packageName);
+    return watchApps.size();
   }
 
   @Override
-  public void removeIntercept(int uid) {
-    interceptApps.remove(uid);
+  public void setIntercept(int uid, String process) {
+    if (process == null)
+      interceptApps.put(uid, NO_FILTER);
+    else {
+      String pkgs = interceptApps.get(uid);
+      String insertItem = SPLIT + process;
+      if (pkgs != null) {
+        if (!pkgs.contains(insertItem)) {
+          pkgs += insertItem;
+          interceptApps.put(uid, pkgs);
+        }
+      } else
+        interceptApps.put(uid, insertItem);
+    }
+  }
+
+  @Override
+  public void removeIntercept(int uid, String pkg) {
+    if (uid > SYSTEM_UID)
+      interceptApps.remove(uid);
+    else {
+      String pkgs = interceptApps.get(uid);
+      if (pkgs != null) {
+        String insertItem = SPLIT + pkg;
+        pkgs = pkgs.replace(insertItem, "");
+        if (pkgs.isEmpty()) {
+          interceptApps.remove(uid);
+        } else {
+          interceptApps.put(uid, pkgs);
+        }
+      }
+    }
   }
 
   @Override
@@ -412,18 +484,62 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
 
 
   public static int appendPlugin(String pluginDex, String pluginLib, String pluginClass, String pluginParams, int pluginFlags) {
-    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDex, pluginLib, pluginClass, pluginParams, pluginFlags);
+    int[] reason = new int[1];
+    AlbatrossPlugin plugin = DynamicPluginManager.getInstance().appendPlugin(pluginDex, pluginLib, pluginClass, pluginParams, pluginFlags, reason);
     if (plugin != null) {
       if (plugin.load(SystemServerInjectAgent.v())) {
         plugin.onAttachSystem(Albatross.currentApplication());
-      }
+      } else
+        return DEX_LOAD_FAIL;
       return 0;
     }
-    return 1;
+    return reason[0];
   }
 
   public static boolean disablePlugin(String pluginDexPath, String pluginClassName) {
     return DynamicPluginManager.getInstance().disablePlugin(pluginDexPath, pluginClassName);
+  }
+
+  static final int flagMask = 75;//FLAG_PERMISSION_REVIEW_REQUIRED + FLAG_PERMISSION_REVOKE_ON_UPGRADE + FLAG_PERMISSION_USER_FIXED + FLAG_PERMISSION_USER_SET
+  static final int flagValues = 1;//FLAG_PERMISSION_USER_SET
+
+  @Override
+  public String allowAppPermission(String pkgName, String permissionName, int uid) {
+    PackageManager packageManager = context.getPackageManager();
+    AppOpsManager appOpsManager = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+    if (uid <= 0) {
+      try {
+        PackageInfo packageInfo = packageManager.getPackageInfo(pkgName, 0);
+        uid = packageInfo.applicationInfo.uid;
+      } catch (PackageManager.NameNotFoundException e) {
+        return "app not find";
+      }
+    }
+    if (ApplicationPackageManagerH.getPermissionManager != null) {
+      if ("android.permission.SYSTEM_ALERT_WINDOW".equals(permissionName)) {
+        AppOpsManagerH.setMode(appOpsManager, AppOpsManagerH.OP_SYSTEM_ALERT_WINDOW, uid, pkgName, AppOpsManager.MODE_ALLOWED);
+        AppOpsManagerH.setMode(appOpsManager, AppOpsManagerH.OP_RUN_ANY_IN_BACKGROUND, uid, pkgName, AppOpsManager.MODE_ALLOWED);
+        AppOpsManagerH.setMode(appOpsManager, AppOpsManagerH.OP_RUN_IN_BACKGROUND, uid, pkgName, AppOpsManager.MODE_ALLOWED);
+        return STRING_SUCCESS;
+      }
+      Object manager = ApplicationPackageManagerH.getPermissionManager.invoke(packageManager);
+      Object pm = ApplicationPackageManagerH.PermissionManager.mPermissionManager.get(manager);
+      ApplicationPackageManagerH.IPermissionManager.grantRuntimePermission.invoke(pm, pkgName, permissionName, 0);
+      ApplicationPackageManagerH.IPermissionManager.updatePermissionFlags.invoke(pm, pkgName, permissionName, flagMask, flagValues, true, 0);
+    } else {
+      IInterface pm = ApplicationPackageManagerH.mPM.get(packageManager);
+      ApplicationPackageManagerH.IPackageManager.grantRuntimePermission.invoke(pm, pkgName, permissionName, 0);
+      ApplicationPackageManagerH.IPackageManager.updatePermissionFlags.invoke(pm, permissionName, pkgName, flagMask, flagValues, true, 0);
+    }
+    String appOp = AppOpsManager.permissionToOp(permissionName);
+    AppOpsManagerH.setUidMode(appOpsManager, appOp, uid, 0);
+    return STRING_SUCCESS;
+  }
+
+
+  @Override
+  public int getVersion() {
+    return AGENT_VERSION;
   }
 
 

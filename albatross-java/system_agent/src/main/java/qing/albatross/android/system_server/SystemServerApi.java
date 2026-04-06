@@ -36,11 +36,14 @@ public interface SystemServerApi {
 
   boolean init();
 
+
   int setInterceptApp(String packageName, boolean clear);
 
-  void setIntercept(int uid);
+  int addWatchApp(String packageName, boolean clear);
 
-  void removeIntercept(int uid);
+  void setIntercept(int uid, String process);
+
+  void removeIntercept(int uid, String process);
 
   void clearIntercept();
 
@@ -52,15 +55,15 @@ public interface SystemServerApi {
 
   int initIntercept();
 
-
   String getFrontActivity();
 
   String getFrontActivityQuick();
 
-
-
   @Broadcast
-  byte launchProcess(int uid, int pid, String data);
+  byte launchProcess(int uid, int pid, String pkg, String processName, String data);
 
 
+  int getVersion();
+
+  String allowAppPermission(String pkgName, String permissionName, int uid);
 }

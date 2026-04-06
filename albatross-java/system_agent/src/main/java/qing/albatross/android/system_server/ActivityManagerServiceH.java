@@ -15,8 +15,13 @@
  */
 package qing.albatross.android.system_server;
 
+import static android.os.Process.SYSTEM_UID;
+import static qing.albatross.android.system_server.SystemServerInjectAgent.NO_FILTER;
+import static qing.albatross.android.system_server.SystemServerInjectAgent.SPLIT;
 import static qing.albatross.android.system_server.SystemServerInjectAgent.shouldInterceptUid;
 
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.util.SparseArray;
@@ -24,8 +29,10 @@ import android.util.SparseArray;
 import org.json.JSONObject;
 
 import qing.albatross.annotation.ExecutionOption;
+import qing.albatross.annotation.FuzzyMatch;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.MethodHook;
+import qing.albatross.annotation.MethodHookBackup;
 import qing.albatross.annotation.TargetClass;
 import qing.albatross.core.Albatross;
 import qing.albatross.reflection.FieldDef;
@@ -51,7 +58,7 @@ public class ActivityManagerServiceH {
 
 
   @MethodBackup
-  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"},maxSdk = 33)
+  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"}, maxSdk = 33)
   static boolean attachApplicationLocked(Object ams, Object iApplicationThread,
                                          int pid, int callingUid, long startSeq) {
     interceptCheck(ams, pid, callingUid);
@@ -60,7 +67,7 @@ public class ActivityManagerServiceH {
 
 
   @MethodBackup
-  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"},minSdk = 33)
+  @MethodHook(value = {"android.app.IApplicationThread", "int", "int", "long"}, minSdk = 33)
   static void attachApplicationLocked$Hook_U(Object ams, Object iApplicationThread,
                                              int pid, int callingUid, long startSeq) {
     interceptCheck(ams, pid, callingUid);
@@ -70,7 +77,8 @@ public class ActivityManagerServiceH {
   private static void interceptCheck(Object ams, int pid, int callingUid) {
     if (mActivityManagerService == null)
       mActivityManagerService = ams;
-    if (shouldInterceptUid(callingUid) && SystemServerInjectAgent.v().getSubscriberSize() > 0) {
+    String interceptCondition = shouldInterceptUid(callingUid);
+    if (interceptCondition != null && SystemServerInjectAgent.v().getSubscriberSize() > 0) {
       try {
         JSONObject jsonObject = new JSONObject();
         Object pids = mPidsSelfLocked.get(ams);
@@ -82,10 +90,14 @@ public class ActivityManagerServiceH {
           processRecord = PidMapH.get(pids, pid);
         String processName = ProcessRecordH.processName.get(processRecord);
         ApplicationInfo applicationInfo = ProcessRecordH.info.get(processRecord);
+        String pkg = null;
         if (applicationInfo != null) {
-          jsonObject.put("pkg", applicationInfo.packageName);
+          pkg = applicationInfo.packageName;
+          if (callingUid <= SYSTEM_UID && !interceptCondition.contains(NO_FILTER)) {
+            if (!interceptCondition.contains(SPLIT + pkg))
+              return;
+          }
         }
-        jsonObject.put("process", processName);
         String name = null;
         String componentType = null;
         if (ProcessRecordH.hostingNameStr != null) {
@@ -102,10 +114,41 @@ public class ActivityManagerServiceH {
           jsonObject.put("type", componentType);
           jsonObject.put("name", name);
         }
-        SystemServerInjectAgent.v().notifyProcessLaunch(callingUid, pid, jsonObject.toString());
+        SystemServerInjectAgent.v().notifyProcessLaunch(callingUid, pid, pkg, processName, jsonObject.toString());
       } catch (Exception e) {
         Albatross.log("interceptCheck", e);
       }
     }
   }
+
+
+  @MethodHookBackup(maxSdk = Build.VERSION_CODES.Q)
+  public static Intent registerReceiver(Object ams, @FuzzyMatch Object caller, String callerPackage,
+                                        @FuzzyMatch Object receiver, IntentFilter filter, String permission, int userId, int flags) {
+    Intent intent = registerReceiver(ams, caller, callerPackage, receiver, filter, permission, userId, flags);
+    return checkIntent(callerPackage, filter, intent);
+  }
+
+  @MethodHookBackup(minSdk = Build.VERSION_CODES.R)
+  public static Intent registerReceiverWithFeature(Object ams, @FuzzyMatch Object caller, String callerPackage,
+                                                   String callerFeatureId, @FuzzyMatch Object receiver, IntentFilter filter,
+                                                   String permission, int userId, int flags) {
+    Intent intent = registerReceiverWithFeature(ams, caller, callerPackage, callerFeatureId, receiver, filter, permission, userId, flags);
+    return checkIntent(callerPackage, filter, intent);
+  }
+
+  @MethodHookBackup(minSdk = Build.VERSION_CODES.S)
+  public static Intent registerReceiverWithFeature(Object ams,
+                                                   @FuzzyMatch Object caller, String callerPackage,
+                                                   String callerFeatureId, String receiverId, @FuzzyMatch Object receiver,
+                                                   IntentFilter filter, String permission, int userId, int flags) {
+    Intent intent = registerReceiverWithFeature(ams, caller, callerPackage, callerFeatureId, receiverId, receiver, filter, permission, userId, flags);
+    return checkIntent(callerPackage, filter, intent);
+  }
+
+  private static Intent checkIntent(String callerPackage, IntentFilter filter, Intent intent) {
+    return intent;
+  }
+
+
 }
