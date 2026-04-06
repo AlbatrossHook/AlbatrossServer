@@ -296,6 +296,10 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
+  def get_plugin_id(self, plugin_dex: str, plugin_class: str) -> int:
+    pass
+
+  @rpc_api
   def register_plugin(self, plugin_id: int, plugin_dex: str | None, plugin_lib: str | None, plugin_class: str,
       plugin_params: str | None, arg_int: int) -> SetResult:
     """
@@ -314,12 +318,13 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
-  def delete_plugin(self, plugin_id: int) -> byte:
+  def delete_plugin(self, plugin_id: int, affect_exist: bool = False) -> byte:
     """
     删除插件
 
     Args:
         plugin_id (int): 插件ID
+        affect_exist(bool): 是否对已经注入的app生效
 
     Returns:
         byte: 删除结果
@@ -363,13 +368,14 @@ class AlbatrossClient(RpcClient):
     """
 
   @rpc_api
-  def add_plugin_rule(self, plugin_id: int, app_id: int) -> SetResult:
+  def add_plugin_rule(self, plugin_id: int, app_id: int, process: str | None = None) -> SetResult:
     """
     添加插件规则
 
     Args:
         plugin_id (int): 插件ID
         app_id (int): 应用ID
+        process (str):进程名（for uid=1000）
 
     Returns:
         SetResult: 设置结果
@@ -501,7 +507,7 @@ class AlbatrossClient(RpcClient):
     print('system server die')
 
   @broadcast_api
-  def launch_process(self, uid: int, pid: int, process_info: dict) -> void:
+  def launch_process(self, uid: int, pid: int, pkg: str, process: str, process_info: dict) -> void:
     """
     进程启动广播
 
@@ -513,7 +519,7 @@ class AlbatrossClient(RpcClient):
     Returns:
         void: 无返回值
     """
-    print(f'[*] process uid:{uid} pid:{pid} info: {process_info}')
+    self.log(f'[*] process uid:{uid} pid:{pid} process:{process} info: {process_info}')
     callbacks = self.launch_callback.get(uid)
     if callbacks:
       self.invoke_callbacks(callbacks, uid, pid, process_info)
@@ -608,6 +614,10 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def process_uid(self, pid: int) -> int:
+    pass
+
+  @rpc_api
+  def watch_app(self, uid: int) -> bool:
     pass
 
   @staticmethod

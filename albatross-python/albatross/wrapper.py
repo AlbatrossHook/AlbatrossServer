@@ -36,6 +36,43 @@ def __get_nil():
 nil_value = __get_nil()
 
 
+class TimeoutLock:
+  """带超时功能的锁上下文管理器"""
+
+  acquire_lock = False
+
+  def __init__(self, lock=None, timeout=10):
+    # 默认为可重入锁，兼容你之前的 threading.RLock
+    self.lock = lock or threading.RLock()
+    self.timeout = timeout
+
+  def acquire(self, timeout=None):
+    """获取锁，支持覆盖默认超时时间"""
+    actual_timeout = timeout if timeout is not None else self.timeout
+    # 带超时获取锁
+    acquired = self.lock.acquire(timeout=actual_timeout)
+    self.acquire_lock = acquired
+
+  def release(self):
+    """释放锁"""
+    if self.acquire_lock:
+      self.lock.release()
+      self.acquire_lock = False
+
+  def __enter__(self):
+    """with 语句进入时调用"""
+    # if not self.acquire():
+    #   raise TimeoutError(f"获取锁超时（超时时间：{self.timeout} 秒）")
+    self.acquire()
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    """with 语句退出时调用"""
+    self.release()
+    # 不抑制异常，让异常正常抛出
+    return False
+
+
 class cached_property(object):
   nil_value = nil_value
 
@@ -52,7 +89,7 @@ class cached_property(object):
     obj_dict = obj.__dict__
     val = obj_dict.get(attr_name, nil_value)
     if val is nil_value:
-      with self.lock:
+      with TimeoutLock(self.lock, 10):
         val = obj_dict.get(attr_name, nil_value)
         if val is nil_value:
           val = func(obj)
@@ -127,6 +164,11 @@ class cached_class_property(object):
 
   @staticmethod
   def try_get(cls, attr, default_value=nil_value):
+    if attr not in cls.__dict__:
+      return default_value
+    v = cls.__dict__[attr]
+    if isinstance(v, cached_class_property):
+      return default_value
     if hasattr(cls, attr):
       v = getattr(cls, attr)
       return v
@@ -160,6 +202,15 @@ class cached_subclass_property(cached_class_property):
   def __init__(self, func):
     super().__init__(func)
     self.value_tables = {}
+
+  @staticmethod
+  def try_get(cls, attr, default_value=nil_value):
+    if attr not in cls.__dict__:
+      return default_value
+    if hasattr(cls, attr):
+      v = getattr(cls, attr)
+      return v
+    return default_value
 
   @staticmethod
   def delete(cls, attr):

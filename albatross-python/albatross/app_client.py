@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from enum import IntFlag, IntEnum
 
 from albatross.rpc_client import RpcClient, rpc_api, void, broadcast_api
@@ -69,7 +70,7 @@ class AppClient(RpcClient):
 
   @rpc_api
   def hook_method(self, class_name: str, method_name: str, num_args: int, args: str = None,
-      min_dex_pc: int = 0, max_dex_pc: int = 128) -> InsHookResult:
+      min_dex_pc: int = 0, max_dex_pc: int = 128, safe_string: bool = False) -> InsHookResult:
     """
     钩子方法，用于拦截和修改方法调用
 
@@ -80,6 +81,7 @@ class AppClient(RpcClient):
         args (str): 参数信息
         min_dex_pc (int): 最小的DEX程序计数器
         max_dex_pc (int): 最大的DEX程序计数器
+        safe_string(bool): 参数是否可以安全的转换成字符串
 
     Returns:
         int: 监听器ID
@@ -123,5 +125,5 @@ class AppClient(RpcClient):
   def send(self, content: str, exception: str) -> void:
     if exception:
       print("[#]", content, exception)
-    else:
+    elif not self.quiet:
       print("[*] " + content)

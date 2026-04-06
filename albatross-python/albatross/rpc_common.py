@@ -25,6 +25,8 @@ BROADCAST_RESULT_NO_HANDLER = -120
 
 old_version = False
 
+STRING_ENCODING = 'utf-8'
+
 
 class short(int):
   pass
@@ -57,9 +59,9 @@ class ResultRaw:
 
 
 class ServerReturnResult(ByteEnum):
-  ERR_NO_SUPPORT = -4
-  NO_HANDLE = -5
-  HANDLE_EXCEPTION = -6
+  ERR_NO_SUPPORT = -123
+  NO_HANDLE = -122
+  HANDLE_EXCEPTION = -121
 
 
 err_desc = {
@@ -162,7 +164,7 @@ def read_string(data, idx):
         break
   s = data[idx + 2:idx + str_len + 2]
   try:
-    s = s.decode()
+    s = s.decode(STRING_ENCODING)
   except:
     s = str(s)
   return s, idx + 2 + str_len + 1
@@ -225,6 +227,10 @@ def put_long(data):
   return struct.pack('<q', data)
 
 
+def put_dict(data):
+  return put_string(json.dumps(data, ensure_ascii=False))
+
+
 def nop(data):
   return b''
 
@@ -246,7 +252,7 @@ def put_bool(b: bool):
 
 def put_string(s: str):
   if s:
-    bs = s.encode()
+    bs = s.encode(STRING_ENCODING)
     s_len = len(bs)
     if s_len > 0xffff:
       s_len = 0xffff
@@ -281,7 +287,7 @@ def convert_bytes(cmd, idx, b: bytes):
 def convert_string(cmd, idx, s: str):
   if s:
     b_len = struct.pack('<H', len(s))
-    return cmd, idx, b''.join([b_len, s.encode(), b'\0'])
+    return cmd, idx, b''.join([b_len, s.encode(STRING_ENCODING), b'\0'])
   return cmd, idx, b'\0\0'
 
 
@@ -296,7 +302,8 @@ def put_bytes(b: bytes):
 
 
 arg_convert_tables = {int: put_int, str: put_string, str | None: put_string, bytes: put_bytes, bool: put_bool,
-                      float: put_float, double: put_double, byte: put_byte, long: put_long, socket.socket: nop}
+                      float: put_float, double: put_double, byte: put_byte, long: put_long, socket.socket: nop,
+                      dict: put_dict}
 
 arg_read_tables = {int: read_int, str: read_string, str | None: read_string, byte: read_byte, bool: read_bool,
                    float: read_float, double: read_double, short: read_short, long: read_long, dict: read_json,
@@ -332,8 +339,8 @@ class JustReturn(object):
     self.result = result
 
 
-def create_call_function(arg_list, default_args):
-  def __wrapper(client, *args):
+def create_call_function(arg_list, default_args, arg_index: dict = None):
+  def __wrapper(client, *args, **kwargs):
     bs = []
     len_args = len(args)
     if len_args != len(arg_list):
@@ -344,8 +351,13 @@ def create_call_function(arg_list, default_args):
       new_args = []
       new_args.extend(args)
       new_args.extend(default_args[(len_args - len(arg_list)):])
+      if kwargs:
+        for k, v in kwargs.items():
+          if k not in arg_index:
+            raise RuntimeError(f'{k} is not supported argument')
+          idx = arg_index[k]
+          new_args[idx] = v
       args = new_args
-
     for i, arg in enumerate(args):
       bs.append(arg_list[i](arg))
     return b''.join(bs)

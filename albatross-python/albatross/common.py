@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from pathlib import Path
+
 import toml
 import re
 import subprocess
@@ -23,9 +25,13 @@ import random
 import string
 
 lib_origin_name = 'libalbatross_base.so'
+SYSTEM_UID = 1000
+
+ERROR_SPLIT = b"Error:\n"
+ERROR_SPLIT2 = b'\n' + ERROR_SPLIT
 
 
-def generate_random_variable_name(length=None, min_length=1, max_length=20):
+def generate_random_variable_name(length=None, min_length=1, max_length=20, underline=True):
   """
   生成随机变量名，可指定长度或使用随机长度
 
@@ -48,9 +54,12 @@ def generate_random_variable_name(length=None, min_length=1, max_length=20):
     final_length = random.randint(min_length, max_length)
 
   # 第一个字符只能是字母或下划线
-  first_chars = string.ascii_letters + '_'
+  first_chars = string.ascii_letters
   # 后续字符可以是字母、数字或下划线
-  other_chars = string.ascii_letters + string.digits + '_'
+  other_chars = string.ascii_letters + string.digits
+  if underline:
+    first_chars += '_'
+    other_chars += '_'
 
   # 生成第一个字符
   variable_name = [random.choice(first_chars)]
@@ -62,16 +71,15 @@ def generate_random_variable_name(length=None, min_length=1, max_length=20):
   return ''.join(variable_name)
 
 
-def run_shell(cmd, timeout=20, split=False):
+def run_shell(cmd, timeout=20, split=False, shell=True):
   try:
     cmdshell = subprocess.Popen(
-      cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True
-    )
+      cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
     stdout, stderr = cmdshell.communicate(timeout=timeout)
     if stdout and stderr:
-      lines = b"\nError:\n".join([stdout, stderr])
+      lines = ERROR_SPLIT2.join([stdout, stderr])
     elif stderr:
-      lines = b"Error:\n" + stderr
+      lines = ERROR_SPLIT + stderr
     else:
       lines = stdout
     if split:
@@ -94,6 +102,12 @@ class Configuration(object):
     current_dir = os.path.dirname(__file__)
     local_config = current_dir + '/albatross_config_local.toml'
     if os.path.exists(local_config):
+      with open(local_config, 'r') as fp:
+        return toml.load(fp)
+    albatross_dir = str(Path.home()) + '/.albatross'
+    os.makedirs(albatross_dir, exist_ok=True)
+    local_config = albatross_dir + '/albatross_config.toml'
+    if os.path.exists(local_config):
       with open(local_config) as fp:
         return toml.load(fp)
     with open(current_dir + '/albatross_config.toml') as fp:
@@ -101,6 +115,7 @@ class Configuration(object):
     lib_name = generate_random_variable_name(min_length=3, max_length=6)
     config['lib_name'] = f'lib{lib_name}.so'
     config['app_agent_name'] = f'framework-{generate_random_variable_name(3)}.jar'
+    config['system_server_agent_file'] = f'/data/local/tmp/system_{generate_random_variable_name(3)}.jar'
     with open(local_config, 'w') as fp:
       toml.dump(config, fp)
     return config
@@ -134,6 +149,18 @@ class Configuration(object):
     if os.path.exists(path):
       return path
     return cached_class_property.nil_value
+
+  @cached_class_property
+  def config_dir(self):
+    res = self.config.get('config_dir')
+    if res:
+      os.makedirs(res, exist_ok=True)
+      if os.path.exists(res):
+        return res
+      print('config_dir {} is configured but does not exist'.format(res))
+    res = str(Path.home()) + "/.albatross/"
+    os.makedirs(res, exist_ok=True)
+    return res
 
   @cached_class_property
   def resource_dir(self):
@@ -189,7 +216,7 @@ class Configuration(object):
 
   albatross_register_func = __make_get('albatross_register_func', "albatross_load_init")
 
-  system_server_agent_dst = __make_get('system_server_agent_dst', '/data/dalvik-cache/albatross_server.dex')
+  system_server_agent_dst = __make_get('system_server_agent_dst', '/data/local/tmp/albatross_server.dex')
 
   app_agent_name = __make_get('app_agent_name', 'framework-albatross.jar')
 

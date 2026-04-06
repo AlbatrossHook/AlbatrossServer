@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import os.path
 
 from .wrapper import cached_class_property
@@ -21,6 +20,8 @@ from .wrapper import cached_class_property
 class Plugin(object):
   dex_device_dst = None
   plugin_updated = False
+  generate_id = False
+  nil_plugin_id = -100
 
   @cached_class_property
   def plugin_tables(self):
@@ -38,7 +39,11 @@ class Plugin(object):
       plugin.plugin_params = plugin_params
       plugin.plugin_flags = plugin_flags
     else:
-      plugin = Plugin(len(plugin_tables), plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
+      if cls.generate_id:
+        plugin_id = len(plugin_tables)
+      else:
+        plugin_id = cls.nil_plugin_id
+      plugin = Plugin(plugin_id, plugin_dex, plugin_class, plugin_lib, plugin_params, plugin_flags)
       plugin_tables[file_path_abs] = plugin
     return plugin
 

@@ -20,10 +20,20 @@ class DeviceOffline(AlbatrossException):
   def __init__(self, device):
     self.device = device
 
+  def __repr__(self):
+    return f'device {self.device} offline'
+
+  __str__ = __repr__
+
 
 class DeviceNoFindErr(AlbatrossException):
   def __init__(self, device_id):
     self.device_id = device_id
+
+  def __repr__(self):
+    return f'device {self.device_id} not find'
+
+  __str__ = __repr__
 
 
 class NoDeviceFound(AlbatrossException):
@@ -35,6 +45,15 @@ class DeviceNotRoot(AlbatrossException):
     self.device = device
 
 
+class DeviceReboot(AlbatrossException):
+  pass
+
+
 class PackageNotInstalled(AlbatrossException):
   def __init__(self, package):
     self.package = package
+
+  def __repr__(self):
+    return f'package {self.package} not install'
+
+  __str__ = __repr__

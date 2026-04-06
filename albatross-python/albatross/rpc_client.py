@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import select
 import threading
 import time
@@ -56,7 +55,6 @@ class AlbRpcMethod(object):
     method_name = self.name
     if client.prohibit_request:
       raise BanRequestException('forbid request {} this time'.format(method_name))
-    assert not kwargs
     call_counter = client.call_counter
     method_id = call_counter & CALL_ID_MASK
     client.call_counter = call_counter + 1
@@ -68,26 +66,28 @@ class AlbRpcMethod(object):
     if not quiet:
       method_id_name = method_name + "|" + str(method_id)
       if hint:
-        print("request method:", method_id_name, args, hint)
+        client.rpc_log(f"request method:{method_id_name} {args} {hint}")
       else:
-        print("request method:", method_id_name, args)
+        client.rpc_log(f"request method:{method_id_name} {args}")
     else:
       method_id_name = None
-    content = self.handler(*args)
+    content = self.handler(*args, **kwargs)
     sock = client.sock
+    if not sock:
+      raise RpcCloseException(f'{client} socket closed')
     if timeout:
       sock.settimeout(timeout)
     if content and not isinstance(content, bytes):
       if isinstance(content, JustReturn):
         return content.result
-      content = str(content).encode()
+      content = str(content).encode(STRING_ENCODING)
     request_lock = client.request_lock
     # if request_lock:
     send_exception = None
     idx, result, data = None, None, None
     get_lock = request_lock.acquire(True, timeout=client.request_lock_wait_time)
     start = time.time()
-    client.last_request_time = start
+    client.last_request_time = (start, method_name)
     parser = self.parser
     try:
       rpc_send_data(sock, content, method_id, self.rpc_id)
@@ -106,18 +106,18 @@ class AlbRpcMethod(object):
     end = time.time()
     if parser == void:
       if not quiet:
-        print("response %s[%.2f]:" % (method_id_name, (end - start)), 'no return', rpc_name)
+        client.rpc_log(f"response {method_id_name}[{end - start:.2f}]:no return {rpc_name}")
       return
     if idx != method_id:
       desc = f'rpc {rpc_name} {method_name} response wrong idx except {method_id},got {idx} in {threading.current_thread().name}'
-      print(desc)
+      client.log(desc)
     if result < 0:
       err_fmt = err_desc.get(result)
       if err_fmt:
         err_fmt = err_fmt.format(method_name)
         if data:
           # err_detail, _ = read_string(data, 0)
-          err_detail = data.decode()
+          err_detail = data.decode(STRING_ENCODING)
           if err_detail:
             err_fmt += ",detail:" + err_detail
         raise RpcCallException(err_fmt)
@@ -128,7 +128,7 @@ class AlbRpcMethod(object):
     elif data is None:
       data = result >= 0
     if not quiet:
-      print("response %s[%.2f]:" % (method_id_name, (end - start)), str(data)[:128], rpc_name)
+      client.rpc_log(f"response {method_id_name}[{(end - start):.2f}]:{str(data)[:128]} {rpc_name}")
     if timeout:
       sock.settimeout(client.default_timeout)
     return data
@@ -166,7 +166,9 @@ class RpcMeta(type):
                 raise WrongAnnotation(f'api {key} all argument should mark type')
             elif argcount != len(annotations) + 1:
               raise WrongAnnotation(f'api {key} all argument should mark type')
+            arg_index = {}
             for name, arg_type in annotations.items():
+              arg_index[name] = len(arg_index)
               arg_type_str = str(arg_type)
               if 'str | None' == arg_type_str:
                 arg_type = str
@@ -199,7 +201,7 @@ class RpcMeta(type):
               if issubclass(arg_type, Enum):
                 arg_type = get_enum_real_type(arg_type)
               args.append(arg_convert_tables[arg_type])
-            f = create_call_function(args, default_args)
+            f = create_call_function(args, default_args, arg_index)
             f.__name__ = attr_value.__name__
             call_tables[key] = (f, ret_f)
           elif hasattr(attr_value, '_broadcast'):
@@ -353,17 +355,17 @@ class SocketMonitor(threading.Thread):
       if self.is_alive():
         print("Warning: SocketMonitor thread did not terminate properly")
     else:
-      print('socket monitor closed')
+      RpcClient.log('socket monitor closed')
     try:
       self._wake_reader.close()
       self._wake_writer.close()
     except Exception as e:
-      print(f"Error closing wake resources: {e}")
+      RpcClient.log(f"Error closing wake resources: {e}")
     if self.poll:
       try:
         self.poll.close()
       except Exception as e:
-        print(f"Error closing poll object: {e}")
+        RpcClient.log(f"Error closing poll object: {e}")
 
   def run(self):
     none_value = (None, None, None)
@@ -402,13 +404,13 @@ class SocketMonitor(threading.Thread):
         if sockets_to_check:
           # 使用 select.select 检查可读或异常
           try:
-            ready_to_read, _, exceptional = select.select(sockets_to_check, [], sockets_to_check, None)  # 非阻塞
+            ready_to_read, _, exceptional = select.select(sockets_to_check, [], sockets_to_check, 1)  # 非阻塞
           except ValueError:
             # 如果 sockets_to_check 中有已关闭的socket，select可能会抛出ValueError
             time.sleep(0.2)  # 短暂休眠避免忙等
             continue
           if not ready_to_read and not exceptional:
-            time.sleep(1)
+            self._wake_event.wait(1)
             continue
           for sock in ready_to_read:
             fileno = sock.fileno()
@@ -451,7 +453,7 @@ class RpcClient(metaclass=RpcMeta):
   broadcast_tables = None
   broadcast_id_maps = None
   default_timeout = 100
-  last_request_time = 0
+  last_request_time = (0, '')
   call_counter = 0
   request_lock_wait_time = 100
   prohibit_request = False
@@ -459,6 +461,7 @@ class RpcClient(metaclass=RpcMeta):
   send_count = 0
   on_close_callbacks: dict
   quiet = False
+  debug = True
 
   def __init__(self, port, host=None, name=None, timeout=None):
     super().__init__()
@@ -477,6 +480,9 @@ class RpcClient(metaclass=RpcMeta):
 
   def forbid_call(self):
     self.allow_apis = {}
+
+  log = print
+  rpc_log = log
 
   def add_close_listener(self, listener, key='default'):
     self.on_close_callbacks[key] = listener
@@ -516,7 +522,7 @@ class RpcClient(metaclass=RpcMeta):
       return parse_method
     if not self.sock:
       raise RpcCloseException("connection is closed")
-    return super().__getattribute__(method)
+    return super().__getattr__(method)
 
   def connect(self):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -613,7 +619,7 @@ class RpcClient(metaclass=RpcMeta):
   def broadcast_listeners(self) -> dict:
     return defaultdict(list)
 
-  def send(self, cmd, data, idx):
+  def _response(self, cmd, data, idx):
     if self.can_send:
       rpc_send_data(self.sock, data, idx, cmd)
     else:
@@ -627,9 +633,12 @@ class RpcClient(metaclass=RpcMeta):
     if is_close:
       self.on_close(is_close, sock)
       return
+    last_request_time, method_name = self.last_request_time
     if not self.subscribe_thread:
-      elapse_time = time.time() - self.last_request_time
+      elapse_time = time.time() - last_request_time
       if elapse_time < 8:
+        if method_name == 'subscribe':
+          self.log('get subscribe return?')
         return
       self.on_close(is_close, sock)
       if not is_close:
@@ -667,30 +676,38 @@ class RpcClient(metaclass=RpcMeta):
               cmd, idx, to_send = convertor(cmd, idx, result)
           else:
             cmd = BROADCAST_RESULT_NO_HANDLER
-            print(broadcast_name + ' no handler! receive', idx, cmd, data)
+            self.log(f'broadcast {cmd} no handler! receive：{idx}, {data}')
         except Exception as e:
+          self.log(f'do {broadcast_name} receive error')
           traceback.print_exc()
         if should_send and not self.send_count:
-          self.send(cmd, to_send, idx)
+          self._response(cmd, to_send, idx)
         if use_polling:
           return
     except Exception as e:
       if self.continuous:
-        traceback.print_exc()
-        print(f'{self.name} subscriber close:', e)
+        if not isinstance(e, OSError):
+          traceback.print_exc()
+        self.log(f'{self.name} subscriber close:' + str(e))
     self.close()
 
   subscribe_thread: threading.Thread | bool | None = None
 
   def join_subscribe(self, max_time=360):
     subscribe_thread = self.subscribe_thread
-    if subscribe_thread is not None:
-      while subscribe_thread.is_alive() and max_time > 0:
-        time.sleep(5)
-        max_time -= 5
-        # subscribe_thread.join()
-      if not subscribe_thread.is_alive():
-        self.subscribe_thread = None
+    if use_polling:
+      if subscribe_thread:
+        while self.sock and max_time > 0:
+          time.sleep(5)
+          max_time -= 5
+    else:
+      if subscribe_thread is not None:
+        while subscribe_thread.is_alive() and max_time > 0:
+          time.sleep(5)
+          max_time -= 5
+          # subscribe_thread.join()
+        if not subscribe_thread.is_alive():
+          self.subscribe_thread = None
 
   subscriber = None
 
@@ -729,6 +746,10 @@ class RpcClient(metaclass=RpcMeta):
     """
 
   @rpc_api
+  def get_pid(self) -> int:
+    pass
+
+  @rpc_api
   def ping(self) -> str:
     """
     测试RPC连接是否正常
@@ -745,6 +766,11 @@ class RpcClient(metaclass=RpcMeta):
     Returns:
         void: 无返回值
     """
+
+  @broadcast_api
+  def broadcast_test(self, s: str) -> int:
+    print('get broadcast test:' + s)
+    return len(s)
 
   def shutdown(self):
     self.continuous = False
