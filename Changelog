@@ -1,3 +1,9 @@
+version 3.4.0
+- Add the API for granting permissions.
+- Optimize the interception of system applications.
+- Instruction hook support trace return.
+- Optimize the support for wireless devices.
+
 version 3.3.0
 - Rpc call improve
 - Optimize the hook for inline methods

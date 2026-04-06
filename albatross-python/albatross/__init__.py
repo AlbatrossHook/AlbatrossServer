@@ -15,11 +15,27 @@
 from typing import Optional
 from . import device
 
-__version__ = "3.1.0"
+__version__ = "3.4.0"
 
 
 def get_device(device_id: Optional[str] = None) -> device.AlbatrossDevice:
   return device.get_device_manager().get_devices(device_id)
+
+
+def get_cached_device(device_id: str) -> device.AlbatrossDevice | None:
+  return device.get_device_manager().get_cached_device(device_id)
+
+
+def remove_device(device_id: str) -> device.AlbatrossDevice | None:
+  return device.get_device_manager().remove_device(device_id)
+
+
+def get_device_ids():
+  return device.get_devices()
+
+
+def get_usb_devices():
+  return device.get_usb_devices()
 
 
 def destroy():
