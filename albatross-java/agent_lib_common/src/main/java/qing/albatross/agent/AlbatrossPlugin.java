@@ -119,4 +119,7 @@ public abstract class AlbatrossPlugin {
 
   public native void log(String msg);
 
+  public int getFlags() {
+    return flags;
+  }
 }

@@ -15,6 +15,9 @@
  */
 package qing.albatross.agent;
 
+import static qing.albatross.agent.Const.DEX_ALREADY_LOAD;
+import static qing.albatross.agent.Const.DEX_INIT_FAIL;
+
 import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -133,12 +136,13 @@ public class DynamicPluginManager {
                                       String nativeLibPath,
                                       String pluginClassName,
                                       String arguments,
-                                      int flags) {
+                                      int flags, int[] reason) {
     String pluginKey = generatePluginKey(pluginDexPath, pluginClassName);
     AlbatrossPlugin plugin = pluginCache.get(pluginKey);
     if (plugin != null) {
       plugin.enable = true;
       modifyPluginConfig(plugin, arguments, flags);
+      reason[0] = DEX_ALREADY_LOAD;
       return null;
     }
     DexClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
@@ -165,6 +169,7 @@ public class DynamicPluginManager {
       Albatross.log("load plugin " + plugin.pluginName() + " success");
       return plugin;
     } catch (Throwable e) {
+      reason[0] = DEX_INIT_FAIL;
       Albatross.log("Failed to load plugin: " + pluginClassName + " from " + pluginDexPath, e);
     }
     return null;
