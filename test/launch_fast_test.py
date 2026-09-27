@@ -1,10 +1,18 @@
+import os
+import sys
 import time
+
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _parent in (_repo_root, os.path.join(_repo_root, 'albatross-python')):
+  if _parent not in sys.path:
+    sys.path.insert(0, _parent)
 
 import albatross
 from albatross.albatross_client import AlbatrossInitFlags, InjectFlag
 from albatross.app_client import AppClient
 from albatross.common import Configuration
 from albatross.rpc_common import void, rpc_api
+from test.inject_common import hide_albatross, check_client
 
 
 class DemoClient(AppClient):
@@ -21,13 +29,7 @@ def main(device_id=None, anti_detection=False):
   device.home()
   device.remove_albatross_port()
   if anti_detection:
-    device.anti_detection = True
-    device.add_init_flags(AlbatrossInitFlags.FLAG_ANTI_DETECTION)
-    # 加载无痕hook的代码逻辑
-    # device.load_kpm_impl=xxx
-    if not device.support_kpm:
-      # 没有加载kpm,则memfd注入隐藏,过不了crc检测
-      device.add_inject_flags(InjectFlag.MEMFD)
+    hide_albatross(device)
 
   user_pkgs = device.get_user_packages()
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
@@ -41,7 +43,8 @@ def main(device_id=None, anti_detection=False):
     device.app_init_flags |= AlbatrossInitFlags.REDIRECT_LOG
   client.create_subscriber()
   client.clear_plugins()
-
+  if not anti_detection:
+    client.set_inject_flags(device.app_inject_flags, device.temp_path)
   fail_launch_pkgs = set()
 
   for pkg in user_pkgs:
@@ -72,6 +75,7 @@ def main(device_id=None, anti_detection=False):
           target_pkg = app_client.get_package_name()
           assert pkg == target_pkg
           app_clients.append(app_client)
+          check_client(anti_detection, device, app_client)
         except Exception as e:
           print(f'test app {pkg} fail:{e}')
           fail_launch_pkgs.add(pkg)
@@ -93,4 +97,4 @@ def main(device_id=None, anti_detection=False):
 
 
 if __name__ == '__main__':
-  main()
+  main(anti_detection=False)

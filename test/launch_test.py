@@ -1,5 +1,11 @@
+import os
 import sys
 import time
+
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _parent in (_repo_root, os.path.join(_repo_root, 'albatross-python')):
+  if _parent not in sys.path:
+    sys.path.insert(0, _parent)
 
 import albatross
 from albatross.app_client import AppClient
@@ -14,14 +20,8 @@ def main(device_id=None, anti_detection=False):
   device.wake_up()
   device.home()
   if anti_detection:
-    device.anti_detection = True
-    device.add_inject_flags(InjectFlag.MEMFD)
-    # 加载无痕hook的代码逻辑
-    # device.load_kpm_impl=xxx
-    if not device.support_kpm:
-      # 没有加载kpm,则memfd注入隐藏,过不了crc检测
-      # 需要加载配套的kpm过crc检测
-      device.add_inject_flags(InjectFlag.MEMFD)
+    hide_albatross(device)
+
   user_pkgs = device.get_user_packages()
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
