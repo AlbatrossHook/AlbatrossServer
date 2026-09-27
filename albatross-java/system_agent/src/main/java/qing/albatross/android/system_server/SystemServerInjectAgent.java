@@ -31,7 +31,6 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.os.Binder;
 import android.os.Build;
 import android.os.IInterface;
 import android.os.UserHandle;
@@ -41,9 +40,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import kotlin.NotImplementedError;
 import qing.albatross.agent.AlbatrossPlugin;
 import qing.albatross.agent.DynamicPluginManager;
+import qing.albatross.agent.InjectAgentBase;
 import qing.albatross.agent.PluginMessage;
 import qing.albatross.annotation.MethodBackup;
 import qing.albatross.annotation.StaticMethodBackup;
@@ -53,13 +52,12 @@ import qing.albatross.common.ThreadConfig;
 import qing.albatross.core.Albatross;
 import qing.albatross.exception.AlbatrossErr;
 import qing.albatross.server.JsonFormatter;
-import qing.albatross.server.UnixRpcInstance;
 import qing.albatross.server.UnixRpcServer;
 
 
-public class SystemServerInjectAgent extends UnixRpcInstance implements SystemServerApi {
+public class SystemServerInjectAgent extends InjectAgentBase implements SystemServerApi {
 
-  public static final int AGENT_VERSION = 1;
+  public static final int AGENT_VERSION = 2;
 
   public static final String NO_FILTER = ":A";
   public static final String SPLIT = ":";
@@ -73,6 +71,11 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
     if (interceptAll)
       return NO_FILTER;
     return interceptApps.get(callingUid);
+  }
+
+
+  public static boolean shouldWatch(int callingUid) {
+    return watchApps.containsKey(callingUid);
   }
 
   @Override
@@ -134,7 +137,6 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
     };
     t.start();
   }
-
 
   public String launcherApp;
   public static final String STRING_SUCCESS = "success";
@@ -240,7 +242,6 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
 
   @Override
   public void setAppAndroidId(int uid, String android_id) throws AlbatrossErr {
-    throw new NotImplementedError();
   }
 
 
@@ -608,6 +609,7 @@ public class SystemServerInjectAgent extends UnixRpcInstance implements SystemSe
     AppOpsManagerH.setUidMode(appOpsManager, appOp, uid, 0);
     return STRING_SUCCESS;
   }
+
 
   public native void collectData(String data);
 

@@ -29,7 +29,7 @@ public abstract class AlbatrossPlugin {
   protected boolean enable;
 
 
-  boolean hasFlags(int flags) {
+  public boolean hasFlags(int flags) {
     return (this.flags & flags) != 0;
   }
 
@@ -65,6 +65,8 @@ public abstract class AlbatrossPlugin {
   public boolean beforeApplicationCreateCall;
 
   public final boolean beforeApplicationCreateCall(Application application) {
+    if (!enable)
+      return false;
     if (!beforeApplicationCreateCall) {
       beforeApplicationCreateCall = true;
       Albatross.log("call plugin " + pluginName() + " beforeApplicationCreate");
@@ -91,6 +93,8 @@ public abstract class AlbatrossPlugin {
   public boolean beforeNewApplicationCall;
 
   public final synchronized boolean beforeNewApplicationCall(ClassLoader cl, String className, Context context) {
+    if (!enable)
+      return false;
     if (!beforeNewApplicationCall) {
       beforeNewApplicationCall = true;
       Albatross.log("call plugin " + pluginName() + " beforeNewApplication");
@@ -113,6 +117,8 @@ public abstract class AlbatrossPlugin {
   public boolean afterNewApplicationCall;
 
   public final boolean afterNewApplicationCall(Application application) {
+    if (!enable)
+      return false;
     synchronized (this) {
       if (!afterNewApplicationCall) {
         afterNewApplicationCall = true;
@@ -171,6 +177,8 @@ public abstract class AlbatrossPlugin {
   public boolean afterApplicationCreateCall;
 
   public final synchronized boolean afterApplicationCreateCall(Application application) {
+    if (!enable)
+      return false;
     if (!afterApplicationCreateCall) {
       afterApplicationCreateCall = true;
       Albatross.log("call plugin " + pluginName() + " afterApplicationCreate");

@@ -6,13 +6,22 @@ from albatross.app_client import AppClient
 from albatross.common import Configuration
 
 
-def main(device_id=None):
+def main(device_id=None, anti_detection=False):
   print('launch mode is deprecated,use launch fast instead.')
   sys.exit(1)
   device = albatross.get_device(device_id)
   assert device.is_root
   device.wake_up()
   device.home()
+  if anti_detection:
+    device.anti_detection = True
+    device.add_inject_flags(InjectFlag.MEMFD)
+    # 加载无痕hook的代码逻辑
+    # device.load_kpm_impl=xxx
+    if not device.support_kpm:
+      # 没有加载kpm,则memfd注入隐藏,过不了crc检测
+      # 需要加载配套的kpm过crc检测
+      device.add_inject_flags(InjectFlag.MEMFD)
   user_pkgs = device.get_user_packages()
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"

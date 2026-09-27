@@ -45,26 +45,27 @@ public final class LogH {
   // Core output method
   @StaticMethodHook
   public static int println(int priority, String tag, String msg) {
-    if (PluginMessage.appLogger != null) {
+    BufferedDailyRollingLogger logger = PluginMessage.appLogger;
+    if (logger != null) {
       if (tag == null) tag = "<null>";
       if (msg == null) msg = "<null>";
       String levelStr = getPriorityString(priority);
       String output = levelStr + "/" + tag + ": " + msg;
-      PluginMessage.appLogger.log(output);
+      logger.log(output);
     }
     return getNextId(); // or just return 0 if you don't care about ID
   }
 
   private static String getPriorityString(int priority) {
-    return switch (priority) {
-      case VERBOSE -> "V";
-      case DEBUG -> "D";
-      case INFO -> "I";
-      case WARN -> "W";
-      case ERROR -> "E";
-      case ASSERT -> "A";
-      default -> "UNKNOWN";
-    };
+    switch (priority) {
+      case VERBOSE :return "V";
+      case DEBUG :return  "D";
+      case INFO : return "I";
+      case WARN :return  "W";
+      case ERROR :return  "E";
+      case ASSERT :return "A";
+      default :return "UNKNOWN";
+    }
   }
 
   // ---- Debug ----

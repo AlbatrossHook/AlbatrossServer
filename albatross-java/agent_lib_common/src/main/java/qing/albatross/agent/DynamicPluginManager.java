@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.zip.ZipFile;
 
 import dalvik.system.DexClassLoader;
 import qing.albatross.core.Albatross;
@@ -31,7 +32,7 @@ import qing.albatross.core.Albatross;
 public class DynamicPluginManager {
 
   Map<String, AlbatrossPlugin> pluginCache;
-  Map<String, DexClassLoader> classLoaderCache;
+  Map<String, ClassLoader> classLoaderCache;
 
 
   private DynamicPluginManager() {
@@ -59,6 +60,25 @@ public class DynamicPluginManager {
 
   private String generatePluginKey(String dexPath, String className) {
     return dexPath + className;
+  }
+
+  /**
+   * The native in-memory loader accepts one raw dex file, while DexClassLoader
+   * understands APK/JAR containers (including multidex APKs).
+   */
+  private boolean isDexArchive(String path) {
+    if (path == null) {
+      return false;
+    }
+    if (path.regionMatches(true, path.length() - 4, ".apk", 0, 4)
+        || path.regionMatches(true, path.length() - 4, ".zip", 0, 4)) {
+      return true;
+    }
+    try (ZipFile zipFile = new ZipFile(path)) {
+      return zipFile.getEntry("classes.dex") != null;
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
 
@@ -93,7 +113,7 @@ public class DynamicPluginManager {
   }
 
   public boolean unloadPluginDex(String pluginDexPath) {
-    DexClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
+    ClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
     if (dexClassLoader != null) {
       classLoaderCache.remove(pluginDexPath);
       List<String> toRemoved = new ArrayList<>();
@@ -145,7 +165,7 @@ public class DynamicPluginManager {
       reason[0] = DEX_ALREADY_LOAD;
       return null;
     }
-    DexClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
+    ClassLoader dexClassLoader = classLoaderCache.get(pluginDexPath);
     String libDir;
     String libName;
     if (nativeLibPath == null || nativeLibPath.length() < 5) {
@@ -157,7 +177,13 @@ public class DynamicPluginManager {
       libName = nativeLibPath.substring(i + 4, nativeLibPath.length() - 3);
     }
     if (dexClassLoader == null) {
-      dexClassLoader = new DexClassLoader(pluginDexPath, null, libDir, DynamicPluginManager.class.getClassLoader());
+      boolean useMemoryDexLoader = Albatross.containsFlags(Albatross.FLAG_ANTI_DETECTION)
+          && pluginDexPath.startsWith("/data/")
+          && !isDexArchive(pluginDexPath);
+      if (useMemoryDexLoader) {
+        dexClassLoader = Albatross.loadMemoryDexClassLoader(pluginDexPath, libDir, DynamicPluginManager.class.getClassLoader(), null);
+      } else
+        dexClassLoader = new DexClassLoader(pluginDexPath, null, libDir, DynamicPluginManager.class.getClassLoader());
       classLoaderCache.put(pluginDexPath, dexClassLoader);
     }
     try {

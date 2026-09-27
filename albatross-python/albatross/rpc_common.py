@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import json
 import logging
 import socket
@@ -170,8 +171,9 @@ def read_string(data, idx):
   s = data[idx + 2:idx + str_len + 2]
   try:
     s = s.decode(STRING_ENCODING)
-  except:
-    s = str(s)
+  except UnicodeDecodeError:
+    # 数据里混入非法 UTF-8（如孤立代理产生的 CESU-8）时替换坏字节，保证返回 str 且后续 json 仍可解析
+    s = s.decode(STRING_ENCODING, errors='replace')
   return s, idx + 2 + str_len + 1
 
 
@@ -210,6 +212,12 @@ def read_byte(data, idx):
 
 
 def put_byte(data):
+  if isinstance(data, bytes):
+    return data
+  if isinstance(data, str):
+    d = data.encode()
+    assert len(d) == 1, d
+    return d
   return bytes([data])
 
 
@@ -250,7 +258,7 @@ def nop(data):
 
 
 def read_short(data, idx):
-  return struct.unpack('<h', data[idx:idx + 2]), idx + 2
+  return struct.unpack('<h', data[idx:idx + 2])[0], idx + 2
 
 
 def put_int(i: int):
@@ -316,12 +324,18 @@ def put_bytes(b: bytes):
 
 
 arg_convert_tables = {int: put_int, str: put_string, str | None: put_string, bytes: put_bytes, bool: put_bool,
-                      float: put_float, double: put_double, byte: put_byte, long: put_long, u32: put_u32, socket.socket: nop,
-                      dict: put_dict}
+  float: put_float, double: put_double, byte: put_byte, long: put_long, u32: put_u32, socket.socket: nop,
+  dict: put_dict}
 
 arg_read_tables = {int: read_int, str: read_string, str | None: read_string, byte: read_byte, bool: read_bool,
-                   float: read_float, double: read_double, short: read_short, long: read_long, u32: read_u32, dict: read_json,
-                   list: read_json, bytes: read_bytes, socket.socket: socket.socket}
+  float: read_float, double: read_double, short: read_short, long: read_long, u32: read_u32, dict: read_json,
+  list: read_json, bytes: read_bytes, socket.socket: socket.socket}
+type_symbol_maps = {int: 'I', str: 's', byte: 'B', bool: 'Z', float: 'F', double: 'D', short: 'S', long: 'J', u32: 'I',
+  bytes: 'b'}
+
+
+def type_to_arg_desc(ts):
+  return ''.join([type_symbol_maps[t] for t in ts])
 
 
 class RpcException(Exception):

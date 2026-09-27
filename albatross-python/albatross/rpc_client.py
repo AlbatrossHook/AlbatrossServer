@@ -134,11 +134,18 @@ class AlbRpcMethod(object):
     return data
 
 
+@dataclass
+class RegisterApiInfo:
+  args: str
+  ret: str
+
+
 class RpcMeta(type):
 
   def __new__(mcs, cls_name, bases, attrs):
     call_tables = {}
     broadcast_tables = {}
+    register_apis = {}
     api_lists = [attrs]
     apis = attrs.get('apis')
     extend_apis = []
@@ -167,6 +174,7 @@ class RpcMeta(type):
             elif argcount != len(annotations) + 1:
               raise WrongAnnotation(f'api {key} all argument should mark type')
             arg_index = {}
+            args_desc = []
             for name, arg_type in annotations.items():
               arg_index[name] = len(arg_index)
               arg_type_str = str(arg_type)
@@ -188,9 +196,13 @@ class RpcMeta(type):
                 else:
                   if issubclass(arg_type, Enum):
                     real_type = get_enum_real_type(arg_type)
+                    register_apis[key] = RegisterApiInfo(args=''.join(args_desc),
+                      ret=type_symbol_maps.get(real_type, '0'))
                     ret_f = EnumResultParser(arg_type, return_type_mappings[real_type])
                   elif arg_type in return_type_mappings:
                     ret_f = return_type_mappings[arg_type]
+                    register_apis[key] = RegisterApiInfo(args=''.join(args_desc),
+                      ret=type_symbol_maps.get(arg_type, '0'))
                   elif hasattr(arg_type, 'parse_value'):
                     ret_f = getattr(arg_type, 'parse_value')
                     if ret_f.__class__.__name__ == 'function':
@@ -200,6 +212,7 @@ class RpcMeta(type):
                 break
               if issubclass(arg_type, Enum):
                 arg_type = get_enum_real_type(arg_type)
+              args_desc.append(type_symbol_maps.get(arg_type, '0'))
               args.append(arg_convert_tables[arg_type])
             f = create_call_function(args, default_args, arg_index)
             f.__name__ = attr_value.__name__
@@ -257,6 +270,7 @@ class RpcMeta(type):
     if extend_apis:
       for api_name in extend_apis:
         attrs[api_name] = api_getter(api_name)
+    attrs['register_apis'] = register_apis
     ncls = super().__new__(mcs, cls_name, bases, attrs)
     return ncls
 
@@ -348,6 +362,11 @@ class SocketMonitor(threading.Thread):
     self.running = False
     self._wake()
     filenos = list(self.callbacks.keys())
+    sockets = []
+    for fileno in filenos:
+      value = self.callbacks.get(fileno)
+      if value:
+        sockets.append(value[0])
     for fileno in filenos:
       self.unregister_socket(fileno)
     if self.is_alive():
@@ -366,6 +385,13 @@ class SocketMonitor(threading.Thread):
         self.poll.close()
       except Exception as e:
         RpcClient.log(f"Error closing poll object: {e}")
+    # close_monitor() can be called without first closing every RpcClient.
+    # Do not leave those sockets open after removing them from the poller.
+    for sock in sockets:
+      try:
+        sock.close()
+      except Exception:
+        pass
 
   def run(self):
     none_value = (None, None, None)
@@ -450,6 +476,7 @@ def close_monitor():
 class RpcClient(metaclass=RpcMeta):
   sock: socket.socket | None = None
   allow_apis = None
+  register_apis: dict
   broadcast_tables = None
   broadcast_id_maps = None
   default_timeout = 100
@@ -525,6 +552,12 @@ class RpcClient(metaclass=RpcMeta):
     return super().__getattr__(method)
 
   def connect(self):
+    sock = self.sock
+    if sock:
+      try:
+        sock.close()
+      except:
+        pass
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
       sock.settimeout(20)
@@ -535,10 +568,18 @@ class RpcClient(metaclass=RpcMeta):
       sock.close()
       raise
     self.sock = sock
-    if use_polling:
-      get_monitor().register_socket(sock, self.on_read_win)
-    else:
-      get_monitor().register_socket(sock, self.on_close)
+    try:
+      if use_polling:
+        get_monitor().register_socket(sock, self.on_read_win)
+      else:
+        get_monitor().register_socket(sock, self.on_close)
+    except Exception:
+      self.sock = None
+      try:
+        sock.close()
+      except Exception:
+        pass
+      raise
 
   def reconnect(self):
     try:
@@ -552,16 +593,19 @@ class RpcClient(metaclass=RpcMeta):
   def close(self):
     subscriber: RpcClient = self.subscriber
     if subscriber:
-      subscriber.shutdown()
-      self.subscriber = None
+      try:
+        subscriber.shutdown()
+      except Exception:
+        traceback.print_exc()
+      finally:
+        self.subscriber = None
     sock = self.sock
     if sock:
       try:
         self.sock = None
         get_monitor().unregister_socket(sock.fileno())
+      finally:
         sock.close()
-      except:
-        pass
       callbacks = self.on_close_callbacks
       if callbacks:
         for key, callback in callbacks.items():
@@ -572,6 +616,12 @@ class RpcClient(metaclass=RpcMeta):
         callbacks.clear()
       return True
     return False
+
+  def flush_api(self):
+    sock = self.sock
+    if not sock:
+      return None
+    return self.get_apis(sock)
 
   def get_apis(self, sock=None):
     if not sock:
@@ -722,11 +772,17 @@ class RpcClient(metaclass=RpcMeta):
   def create_subscriber(self, params: str = None, flags: int = 0) -> 'RpcClient':
     if self.subscriber:
       return self.subscriber
-    subscriber = self.__class__(self.port, self.host, self.name + ':subscribe', self.default_timeout)
-    subscriber.subscribe(params, flags)
-    self.subscriber = subscriber
-    subscriber.add_close_listener(self._subscriber_close, 'subscriber_watch')
-    return subscriber
+    subscriber = None
+    try:
+      subscriber = self.__class__(self.port, self.host, self.name + ':subscribe', self.default_timeout)
+      subscriber.subscribe(params, flags)
+      self.subscriber = subscriber
+      subscriber.add_close_listener(self._subscriber_close, 'subscriber_watch')
+      return subscriber
+    except BaseException:
+      if subscriber is not None:
+        subscriber.shutdown()
+      raise
 
   def parse_subscribe(self, data, result):
     if result >= 0:

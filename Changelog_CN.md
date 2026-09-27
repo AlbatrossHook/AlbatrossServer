@@ -1,3 +1,11 @@
+version 3.6.0
+- 新增 InjectApi 接口与 InjectAgentBase，并配套 Python 端 inject_client，向上层暴露统一的注入 API。
+- 新增 adb 连接管理：adb server / 端点探测、设备列表、带冷却与失败隔离及恢复探测的连接协调器，以及连接指标与健康快照。
+- 重构原生日志：有界队列、批量写盘、按天滚动与保留，以及丢弃 / 写入错误上报。
+- 新增线程 hook 工具：ThreadDumper，以及线程池执行器与未捕获异常的 hook。
+- 注入 agent 新增注入标志（inject flags）与路径重定向；destroy 幂等并注册到 atexit。
+- shell 命令超时时结束整个进程组。
+
 version 3.5.0
 - 新增类 hook API：hook_class / unhook_class，支持静态、实例与构造方法作用域，并可开启 safe tostring。
 - 新增 native 库监控 API：获取模块 / 函数、监视函数、监听库加载、dump native 方法及 onLibLoad 回调。

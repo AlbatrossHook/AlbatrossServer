@@ -34,7 +34,8 @@ public class PrintStreamH {
   }
 
   static void printInternal(String s, boolean isOut) {
-    if (PluginMessage.appLogger != null) {
+    BufferedDailyRollingLogger logger = PluginMessage.appLogger;
+    if (logger != null) {
       String prefix;
       if (isOut) {
         if (outBuilder.length() > 0) {
@@ -51,7 +52,7 @@ public class PrintStreamH {
         }
         prefix = "System.err: ";
       }
-      PluginMessage.appLogger.log(prefix + s);
+      logger.log(prefix + s);
     }
   }
 

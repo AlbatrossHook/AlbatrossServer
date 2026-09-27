@@ -13,15 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package qing.albatross.app.agent.client;
+package qing.albatross.agent;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Locale;
 
-import qing.albatross.agent.BufferedDailyRollingLogger;
-import qing.albatross.agent.PluginMessage;
 import qing.albatross.common.AppMetaInfo;
 import qing.albatross.common.ThreadConfig;
 import qing.albatross.core.Albatross;

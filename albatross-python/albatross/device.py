@@ -11,21 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
+import ipaddress
 import json
 import os
 import random
 import re
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import zlib
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA, SetResult, \
   MountResult
-from .common import Configuration, run_shell, lib_origin_name, generate_random_variable_name, SYSTEM_UID, OUT_TIME_CODE, \
-  logger
+from .common import Configuration, run_shell, lib_origin_name, generate_random_variable_name, SYSTEM_UID, \
+  OUT_TIME_CODE, FAULT_CODE, logger
 from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled, DeviceReboot
 from .plugin import Plugin
 from .rpc_client import byte
@@ -40,16 +46,216 @@ class DeviceBrand:
   Google = 'google'
   RedMi = 'Redmi'
   OPPO = 'OPPO'
+  Xiaomi = 'Xiaomi'
+
+
+def _infer_adb_server_port(args, device_id):
+  if device_id is not None:
+    return adb_server_port_for(device_id)
+  if len(args) >= 2 and str(args[0]) in ('connect', 'disconnect'):
+    return adb_server_port_for(args[1])
+  return AdbConfig.adb_server_ports[0]
+
+
+def run_adb(*args, device_id=None, server_port=None, **kwargs):
+  if server_port is None:
+    server_port = _infer_adb_server_port(args, device_id)
+  command = [AdbConfig.adb_path, '-P', str(server_port)]
+  if device_id is not None:
+    command.extend(['-s', str(device_id)])
+  command.extend(str(arg) for arg in args)
+  return run_shell(command, shell=False, **kwargs)
+
+
+class AdbErrorCode:
+  OK = 'ok'
+  TIMEOUT = 'adb_timeout'
+  UNAVAILABLE = 'adb_unavailable'
+  COMMAND_FAILED = 'adb_command_failed'
+  DISCONNECT_FAILED = 'adb_disconnect_failed'
+  TCP_UNREACHABLE = 'adb_tcp_unreachable'
+
+
+@dataclass(frozen=True)
+class AdbCommandResult:
+  return_code: int
+  output: bytes
+  error_code: str
+  elapsed_ms: float
+
+  @property
+  def ok(self):
+    return self.error_code == AdbErrorCode.OK and self.return_code == 0
+
+
+def run_adb_result(*args, device_id=None, server_port=None, **kwargs):
+  started = time.monotonic()
+  try:
+    run_kwargs = dict(kwargs)
+    if server_port is not None:
+      run_kwargs['server_port'] = server_port
+    return_code, output = run_adb(*args, device_id=device_id, **run_kwargs)
+  except Exception as exc:
+    # Keep callers on the structured error path even if a custom runner or
+    # an unexpected subprocess wrapper raises instead of returning FAULT_CODE.
+    return AdbCommandResult(
+      FAULT_CODE,
+      str(exc).encode('utf-8', errors='replace'),
+      AdbErrorCode.UNAVAILABLE,
+      (time.monotonic() - started) * 1000,
+    )
+  elapsed_ms = (time.monotonic() - started) * 1000
+  if return_code == 0:
+    error_code = AdbErrorCode.OK
+  elif return_code == OUT_TIME_CODE:
+    error_code = AdbErrorCode.TIMEOUT
+  elif return_code == FAULT_CODE:
+    error_code = AdbErrorCode.UNAVAILABLE
+  else:
+    error_code = AdbErrorCode.COMMAND_FAILED
+  return AdbCommandResult(return_code, output or b'', error_code, elapsed_ms)
+
+
+def _parse_device_lines(lines, usb_only=False):
+  devices = []
+  if not lines or 'Error' in lines:
+    return devices
+  for line in lines[1:]:
+    fields = line.strip().split()
+    if len(fields) != 2:
+      continue
+    device_id, status = fields
+    if status in ('offline', 'unauthorized'):
+      continue
+    if usb_only and ('.' in device_id or ':' in device_id):
+      continue
+    devices.append(device_id)
+  return devices
+
+
+def _list_devices_on_server(server_port, usb_only=False):
+  result = run_adb_result('devices', server_port=server_port)
+  if not result.ok:
+    return result, []
+  try:
+    lines = result.output.decode('utf-8', errors='replace').splitlines()
+    if any(line.strip() == 'Error:' for line in lines):
+      return AdbCommandResult(
+        result.return_code, result.output, AdbErrorCode.COMMAND_FAILED, result.elapsed_ms,
+      ), []
+    return result, _parse_device_lines(lines, usb_only=usb_only)
+  except (AttributeError, UnicodeError):
+    return AdbCommandResult(
+      result.return_code, result.output, AdbErrorCode.COMMAND_FAILED, result.elapsed_ms,
+    ), []
+
+
+def list_devices(usb_only=False, server_port=None):
+  """Return an adb result and usable ids from one or all configured servers."""
+  if server_port is not None:
+    return _list_devices_on_server(server_port, usb_only=usb_only)
+
+  ports = AdbConfig.adb_server_ports[:1] if usb_only else AdbConfig.adb_server_ports
+  successful_results = []
+  first_failure = None
+  devices = []
+  for port in ports:
+    result, server_devices = _list_devices_on_server(port, usb_only=usb_only)
+    if result.ok:
+      successful_results.append(result)
+      for device_id in server_devices:
+        if device_id not in devices:
+          devices.append(device_id)
+    elif first_failure is None:
+      first_failure = result
+
+  if not successful_results:
+    return first_failure, []
+  if len(ports) == 1:
+    return successful_results[0], devices
+  output = 'List of devices attached\n' + ''.join(
+    f'{device_id}\tdevice\n' for device_id in devices
+  )
+  return AdbCommandResult(
+    0,
+    output.encode('utf-8'),
+    AdbErrorCode.OK,
+    sum(result.elapsed_ms for result in successful_results),
+  ), devices
 
 
 def check_socket_port(ip, port):
   try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    result = s.connect_ex((ip, port))
-    if result == 0:
-      return False
-    return True
+    port = int(port)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.settimeout(2)
+      result = s.connect_ex((ip, port))
+    return result == 0
   except:
+    return False
+
+
+def is_socket_port_open(ip, port):
+  return check_socket_port(ip, port)
+
+
+def parse_tcp_endpoint(endpoint):
+  """Return ``(host, port)`` for an adb TCP endpoint, otherwise ``None``."""
+  endpoint = str(endpoint or '').strip()
+  if not endpoint:
+    return None
+  if endpoint.startswith('['):
+    closing = endpoint.find(']')
+    if closing <= 1 or endpoint[closing + 1:closing + 2] != ':':
+      return None
+    host = endpoint[1:closing]
+    port_text = endpoint[closing + 2:]
+  else:
+    host, separator, port_text = endpoint.rpartition(':')
+    if not separator or not host:
+      return None
+  try:
+    port = int(port_text)
+  except (TypeError, ValueError):
+    return None
+  if not 1 <= port <= 65535:
+    return None
+  return host, port
+
+
+def normalize_tcp_endpoint(endpoint):
+  """Return a stable textual form for hashing an adb TCP endpoint."""
+  target = parse_tcp_endpoint(endpoint)
+  if target is None:
+    return None
+  host, port = target
+  host = host.strip().lower().rstrip('.')
+  try:
+    host = ipaddress.ip_address(host).compressed
+  except ValueError:
+    pass
+  if ':' in host:
+    host = f'[{host}]'
+  return f'{host}:{port}'
+
+
+def adb_server_port_for(device_id):
+  ports = AdbConfig.adb_server_ports
+  endpoint = normalize_tcp_endpoint(device_id)
+  if endpoint is None:
+    return ports[0]
+  shard = zlib.crc32(endpoint.encode('utf-8')) % len(ports)
+  return ports[shard]
+
+
+def probe_tcp_endpoint(endpoint, timeout):
+  target = parse_tcp_endpoint(endpoint)
+  if target is None:
+    return None
+  try:
+    with socket.create_connection(target, timeout=timeout):
+      return True
+  except (OSError, TypeError, ValueError):
     return False
 
 
@@ -78,122 +284,656 @@ def get_available_port():
 
 
 def get_devices():
-  try:
-    _, lines = run_shell(AlbatrossDevice.adb + " devices", split=True)
-    if "Error" in lines:
-      return []
-    line_len = len(lines)
-    if line_len > 1:
-      devices = []
-      for i in range(1, line_len):
-        device = lines[i].strip().split()
-        if len(device) == 2:
-          device_status = device[1]
-          if device_status != "offline":
-            if device_status != 'unauthorized':
-              devices.append(device[0])
-          else:
-            run_shell(AlbatrossDevice.adb + ' disconnect ' + device[0], timeout=4)
-      return devices
-    return []
-  except:
-    return []
+  return list_devices()[1]
 
 
 def get_usb_devices():
-  try:
-    _, lines = run_shell(AlbatrossDevice.adb + " devices", split=True)
-    if "Error" in lines:
-      return []
-    line_len = len(lines)
-    if line_len > 1:
-      devices = []
-      for i in range(1, line_len):
-        device = lines[i].strip().split()
-        if len(device) == 2:
-          device_id = device[0]
-          device_status = device[1]
-          if device_status != "offline":
-            if '.' not in device_id and device_status != 'unauthorized':
-              devices.append(device_id)
-          else:
-            run_shell(f'{AlbatrossDevice.adb} disconnect {device_id}')
-      return devices
-    return []
-  except:
-    return []
+  return list_devices(usb_only=True)[1]
 
 
 default_connect_timeout = 5
 
 
+def _env_positive_int(name, default):
+  try:
+    value = int(os.environ.get(name, default))
+    return value if value > 0 else default
+  except (TypeError, ValueError):
+    return default
+
+
+def _env_non_negative_float(name, default):
+  try:
+    value = float(os.environ.get(name, default))
+    return value if value >= 0 else default
+  except (TypeError, ValueError):
+    return default
+
+
+def _env_bool(name, default):
+  value = os.environ.get(name)
+  if value is None:
+    return default
+  return value.strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def _valid_adb_server_port(value):
+  try:
+    port = int(value)
+  except (TypeError, ValueError):
+    return None
+  return port if 1024 <= port <= 65535 else None
+
+
+def _env_adb_server_ports():
+  configured = os.environ.get('ALBATROSS_ADB_SERVER_PORTS')
+  values = configured.split(',') if configured else [os.environ.get('ADB_SERVER_PORT', 5037)]
+  ports = []
+  for value in values:
+    port = _valid_adb_server_port(str(value).strip())
+    if port is not None and port not in ports:
+      ports.append(port)
+  if ports:
+    return tuple(ports)
+  legacy_port = _valid_adb_server_port(os.environ.get('ADB_SERVER_PORT', 5037))
+  return (legacy_port or 5037,)
+
+
+class AdbConfig(object):
+  @cached_class_property
+  def adb_server_ports(self):
+    return _env_adb_server_ports()
+
+  @cached_class_property
+  def adb_connect_enabled(self):
+    return _env_bool('ALBATROSS_ADB_CONNECT_ENABLED', True)
+
+  @cached_class_property
+  def adb_transport_owner(self):
+    return _env_bool('ALBATROSS_ADB_TRANSPORT_OWNER', self.adb_connect_enabled)
+
+  @cached_class_property
+  def adb_tcp_probe_enabled(self):
+    return _env_bool('ADB_TCP_PROBE_ENABLED', True)
+
+  @cached_class_property
+  def adb_tcp_probe_timeout(self):
+    return _env_non_negative_float('ADB_TCP_PROBE_TIMEOUT', 0.7)
+
+  @cached_class_property
+  def adb_connect_concurrency(self):
+    return _env_positive_int('ADB_CONNECT_CONCURRENCY', 4)
+
+  @cached_class_property
+  def adb_connect_failure_quarantine(self):
+    return _env_non_negative_float('ADB_CONNECT_FAILURE_QUARANTINE', 360)
+
+  @cached_class_property
+  def adb_connect_cooldown(self):
+    return _env_non_negative_float('ADB_CONNECT_COOLDOWN', 45)
+
+  @cached_class_property
+  def adb_connect_recovery_probe_interval(self):
+    return _env_non_negative_float('ADB_CONNECT_RECOVERY_PROBE_INTERVAL', 5)
+
+  @cached_class_property
+  def adb_connect_recovery_probe_max_interval(self):
+    return _env_non_negative_float('ADB_CONNECT_RECOVERY_PROBE_MAX_INTERVAL', 60)
+
+  @cached_class_property
+  def adb_disconnect_retry_cooldown(self):
+    return _env_non_negative_float('ADB_DISCONNECT_RETRY_COOLDOWN', 45)
+
+  @cached_class_property
+  def device_health_ttl(self):
+    return _env_non_negative_float('ADB_DEVICE_HEALTH_TTL', 3)
+
+  @cached_class_property
+  def connection_coordinator(self) -> '_AdbConnectionCoordinator':
+    return _AdbConnectionCoordinator(
+      self.adb_connect_concurrency,
+      self.adb_connect_cooldown,
+      self.adb_connect_failure_quarantine,
+      self.adb_disconnect_retry_cooldown,
+      self.adb_connect_recovery_probe_interval,
+      self.adb_connect_recovery_probe_max_interval,
+    )
+
+  @cached_class_property
+  def adb_path(self):
+    return Configuration.adb
+
+
+class _AdbConnectionCoordinator:
+
+  def __init__(
+      self, concurrency, cooldown, failure_quarantine, disconnect_cooldown=None,
+      recovery_probe_interval=5, recovery_probe_max_interval=60):
+    self.concurrency = concurrency
+    self.semaphore = threading.BoundedSemaphore(concurrency)
+    self.cooldown = cooldown
+    self.disconnect_cooldown = cooldown if disconnect_cooldown is None else disconnect_cooldown
+    self.failure_quarantine = failure_quarantine
+    self.recovery_probe_interval = recovery_probe_interval
+    self.recovery_probe_max_interval = max(
+      recovery_probe_interval, recovery_probe_max_interval,
+    )
+    self._guard = threading.Lock()
+    self._endpoint_locks = {}
+    self._states = {}
+    self._server_metrics = {}
+    self._metrics = {
+      'tcp_probe_attempts': 0,
+      'tcp_probe_successes': 0,
+      'tcp_probe_failures': 0,
+      'recovery_probe_attempts': 0,
+      'recovery_probe_successes': 0,
+      'recovery_probe_failures': 0,
+      'recovery_probe_skips': 0,
+      'connect_attempts': 0,
+      'connect_successes': 0,
+      'connect_failures': 0,
+      'connect_cooldown_skips': 0,
+      'connect_cooldown_reuses': 0,
+      'disconnect_attempts': 0,
+      'disconnect_successes': 0,
+      'disconnect_failures': 0,
+    }
+
+  @contextmanager
+  def endpoint_lock(self, endpoint):
+    with self._guard:
+      entry = self._endpoint_locks.get(endpoint)
+      if entry is None:
+        entry = {'lock': threading.Lock(), 'users': 0}
+        self._endpoint_locks[endpoint] = entry
+      entry['users'] += 1
+      lock = entry['lock']
+    try:
+      with lock:
+        yield
+    finally:
+      with self._guard:
+        entry['users'] -= 1
+        if entry['users'] == 0 and self._endpoint_locks.get(endpoint) is entry:
+          self._endpoint_locks.pop(endpoint, None)
+
+  def in_cooldown(self, endpoint, now):
+    with self._guard:
+      state = self._states.get(endpoint)
+      if not state:
+        return False, 0
+      remaining = state['retry_after'] - now
+      return remaining > 0, max(remaining, 0)
+
+  def in_connect_quarantine(self, endpoint, now):
+    with self._guard:
+      state = self._states.get(endpoint)
+      if not state or state['failures'] <= 0:
+        return False
+      return state['retry_after'] > now
+
+  def recovery_probe_due(self, endpoint, now):
+    with self._guard:
+      state = self._states.get(endpoint)
+      if not state or state['failures'] <= 0 or state['retry_after'] <= now:
+        return False, 0
+      remaining = state.get('next_recovery_probe_after', now) - now
+      return remaining <= 0, max(remaining, 0)
+
+  # Backward-compatible internal name; connect quarantine is the only
+  # quarantine represented by this predicate.
+  def in_failure_quarantine(self, endpoint, now):
+    return self.in_connect_quarantine(endpoint, now)
+
+  def disconnect_cleanup_due(self, endpoint, now):
+    """Return whether an owner should try to remove a stale transport."""
+    with self._guard:
+      state = self._states.get(endpoint)
+      if state is None or state.get('last_disconnect_attempt') is None:
+        return True
+      if state.get('last_disconnect_ok'):
+        return False
+      return state.get('disconnect_retry_after', 0) <= now
+
+  def recent_connection_is_usable(self, endpoint, now):
+    with self._guard:
+      state = self._states.get(endpoint)
+      return bool(
+        state and state.get('failures') == 0
+        and state.get('transport_registered')
+        and state.get('retry_after', 0) > now
+      )
+
+  def _recovery_probe_delay(self, attempts):
+    exponent = min(max(int(attempts), 0), 30)
+    return min(
+      self.recovery_probe_interval * (2 ** exponent),
+      self.recovery_probe_max_interval,
+    )
+
+  def record_metric(self, name, endpoint=None):
+    with self._guard:
+      self._metrics[name] = self._metrics.get(name, 0) + 1
+      if endpoint is not None:
+        port = adb_server_port_for(endpoint)
+        metrics = self._server_metrics.setdefault(port, {})
+        metrics[name] = metrics.get(name, 0) + 1
+
+  def record_success(self, endpoint, now, error_code=AdbErrorCode.OK, elapsed_ms=None):
+    with self._guard:
+      self._states[endpoint] = {
+        'last_attempt': now,
+        'retry_after': now + self.cooldown,
+        'failures': 0,
+        'last_error': error_code,
+        'last_elapsed_ms': elapsed_ms,
+        'server_port': adb_server_port_for(endpoint),
+        'transport_registered': True,
+        'last_disconnect_attempt': None,
+        'disconnect_retry_after': 0,
+        'last_disconnect_ok': None,
+        'recovery_probe_attempts': 0,
+        'next_recovery_probe_after': 0,
+        'last_recovery_probe_ok': None,
+      }
+
+  def record_failure(self, endpoint, now, error_code=AdbErrorCode.COMMAND_FAILED, elapsed_ms=None):
+    with self._guard:
+      state = self._states.get(endpoint)
+      new_quarantine = bool(
+        state is None or state.get('failures', 0) <= 0
+        or state.get('retry_after', 0) <= now
+      )
+      if state is None:
+        state = {}
+        self._states[endpoint] = state
+      if new_quarantine:
+        state['recovery_probe_attempts'] = 0
+        state['next_recovery_probe_after'] = (
+            now + self._recovery_probe_delay(0)
+        )
+        state['last_recovery_probe_ok'] = None
+      else:
+        recovery_attempts = state.get('recovery_probe_attempts', 0)
+        state['next_recovery_probe_after'] = max(
+          state.get('next_recovery_probe_after', 0),
+          now + self._recovery_probe_delay(recovery_attempts),
+        )
+      state['last_attempt'] = now
+      state['retry_after'] = now + self.failure_quarantine
+      state['failures'] = state.get('failures', 0) + 1
+      state['last_error'] = error_code
+      state['last_elapsed_ms'] = elapsed_ms
+      state['server_port'] = adb_server_port_for(endpoint)
+      state['transport_registered'] = False
+      return state['failures']
+
+  def record_recovery_probe(self, endpoint, now, succeeded, elapsed_ms=None):
+    """Consume one recovery probe slot without clearing connect quarantine."""
+    with self._guard:
+      state = self._states.get(endpoint)
+      if not state or state.get('failures', 0) <= 0:
+        return 0, 0
+      attempts = state.get('recovery_probe_attempts', 0) + 1
+      delay = self._recovery_probe_delay(attempts)
+      state['recovery_probe_attempts'] = attempts
+      state['next_recovery_probe_after'] = now + delay
+      state['last_recovery_probe_ok'] = bool(succeeded)
+      state['last_recovery_probe_elapsed_ms'] = elapsed_ms
+      return attempts, delay
+
+  def record_transport_disconnect(self, endpoint, now, succeeded):
+    with self._guard:
+      state = self._states.setdefault(endpoint, {
+        'last_attempt': now,
+        'retry_after': now,
+        'failures': 0,
+        'last_error': AdbErrorCode.OK,
+        'last_elapsed_ms': None,
+        'server_port': adb_server_port_for(endpoint),
+        'transport_registered': False,
+      })
+      state['last_disconnect_attempt'] = now
+      state['last_disconnect_ok'] = bool(succeeded)
+      state['disconnect_retry_after'] = 0 if succeeded else now + self.disconnect_cooldown
+      state['server_port'] = adb_server_port_for(endpoint)
+      if succeeded:
+        state['transport_registered'] = False
+
+  def has_registered_transport(self, endpoint):
+    with self._guard:
+      state = self._states.get(endpoint)
+      return bool(state and state.get('transport_registered'))
+
+  def mark_transport_disconnected(self, endpoint):
+    with self._guard:
+      state = self._states.get(endpoint)
+      if state is not None:
+        state['transport_registered'] = False
+
+  def forget(self, endpoint):
+    with self._guard:
+      self._states.pop(endpoint, None)
+
+  def snapshot(self, now=None):
+    if now is None:
+      now = time.monotonic()
+    with self._guard:
+      endpoints = {
+        endpoint: {
+          'failures': state['failures'],
+          'retry_after': state['retry_after'],
+          'quarantined': state['retry_after'] > now and state['failures'] > 0,
+          'cooldown_remaining': max(0, state['retry_after'] - now),
+          'last_error': state.get('last_error'),
+          'last_elapsed_ms': state.get('last_elapsed_ms'),
+          'server_port': state.get('server_port', adb_server_port_for(endpoint)),
+          'transport_registered': bool(state.get('transport_registered')),
+          'last_disconnect_ok': state.get('last_disconnect_ok'),
+          'recovery_probe_attempts': state.get('recovery_probe_attempts', 0),
+          'recovery_probe_remaining': max(
+            0, state.get('next_recovery_probe_after', 0) - now,
+          ),
+          'last_recovery_probe_ok': state.get('last_recovery_probe_ok'),
+          'disconnect_retry_remaining': max(
+            0, state.get('disconnect_retry_after', 0) - now,
+          ),
+        }
+        for endpoint, state in self._states.items()
+      }
+      servers = {}
+      for port in AdbConfig.adb_server_ports:
+        server_endpoints = [state for state in endpoints.values() if state['server_port'] == port]
+        servers[port] = {
+          'metrics': dict(self._server_metrics.get(port, {})),
+          'endpoint_count': len(server_endpoints),
+          'transport_count': sum(
+            1 for state in server_endpoints if state['transport_registered']
+          ),
+          'quarantined_count': sum(1 for state in server_endpoints if state['quarantined']),
+        }
+      return {
+        'metrics': dict(self._metrics),
+        'endpoints': endpoints,
+        'servers': servers,
+        'concurrency_limit': self.concurrency,
+      }
+
+
+def get_adb_connection_health():
+  """Return process-local connection metrics and endpoint retry state."""
+  return AdbConfig.connection_coordinator.snapshot()
+
+
+def _adb_disconnect(device_name, timeout=None):
+  kwargs = {'timeout': timeout} if timeout is not None else {}
+  coordinator = AdbConfig.connection_coordinator
+  with coordinator.semaphore:
+    coordinator.record_metric('disconnect_attempts', device_name)
+    result = run_adb_result("disconnect", device_name, **kwargs)
+  coordinator.record_metric(
+    'disconnect_successes' if result.ok else 'disconnect_failures', device_name,
+  )
+  coordinator.record_transport_disconnect(device_name, time.monotonic(), result.ok)
+  return result.return_code, result.output
+
+
+def _connect_response_matches(endpoint, ret_code, response):
+  """Accept only the explicit success line emitted by ``adb connect``."""
+  if ret_code != 0:
+    return False
+  if isinstance(response, bytes):
+    response = response.decode('utf-8', errors='replace')
+  else:
+    response = str(response or '')
+  success = re.compile(
+    r'^(?:connected to|already connected to)\s+' + re.escape(endpoint) + r'$',
+    re.IGNORECASE,
+  )
+  return any(success.fullmatch(line.strip()) for line in response.splitlines())
+
+
+def _verify_transport(endpoint):
+  token = 'albatross_adb_ready'
+  result = run_adb_result('shell', f'echo {token}', device_id=endpoint, timeout=default_connect_timeout)
+  if not result.ok:
+    return result
+  return AdbCommandResult(
+    result.return_code,
+    result.output,
+    AdbErrorCode.OK if token in result.output.decode('utf-8', errors='replace').split()
+    else AdbErrorCode.COMMAND_FAILED,
+    result.elapsed_ms,
+  )
+
+
+def _clear_transport(device_name):
+  if not device_name:
+    return
+  manager = _device_manager
+  if manager is not None:
+    with manager.endpoint_lock(device_name):
+      device = manager.pop_cached_device(device_name)
+      if parse_tcp_endpoint(device_name) is not None and not AdbConfig.adb_transport_owner:
+        logger.info(f'adb disconnect {device_name} skipped in non-owner process')
+        if device is not None:
+          try:
+            device.prevent_new_forwards()
+            ports = device.close_rpc_clients()
+            device.cleanup_forwards(ports, timeout=2)
+          except Exception:
+            logger.exception('failed to clean local resources for %s', device_name)
+        return None
+      return _clear_cached_transport(device_name, device)
+  if parse_tcp_endpoint(device_name) is not None and not AdbConfig.adb_transport_owner:
+    logger.info(f'adb disconnect {device_name} skipped in non-owner process')
+    return None
+  return _clear_cached_transport(device_name, None)
+
+
+def _clear_cached_transport(device_name, device):
+  ports = set()
+  if device is not None:
+    try:
+      device.prevent_new_forwards()
+      # Close local sockets and suppress their callbacks before adb-server
+      # tears down the transport. This step deliberately issues no adb command.
+      ports = device.close_rpc_clients()
+    except Exception:
+      ports = set(getattr(device, '_owned_forward_ports', set()))
+  # A failed TCP transport must leave adb-server before any best-effort forward
+  # cleanup can issue another device-scoped adb command.
+  disconnect_ok = False
+  try:
+    disconnect_result = _adb_disconnect(device_name, timeout=default_connect_timeout)
+    ret_code = disconnect_result[0] if isinstance(disconnect_result, tuple) else 0
+    disconnect_ok = ret_code == 0
+  except Exception:
+    logger.info(f'adb disconnect {device_name} cleanup failed')
+  if device is None:
+    return disconnect_ok
+  try:
+    device.cleanup_forwards(ports, timeout=2)
+  except Exception:
+    logger.info(f'known forward cleanup for {device_name} failed')
+  return disconnect_ok
+
+
+def _record_disconnect_outcome(endpoint, disconnected):
+  if disconnected:
+    AdbConfig.connection_coordinator.forget(endpoint)
+  else:
+    AdbConfig.connection_coordinator.record_failure(
+      endpoint, time.monotonic(), AdbErrorCode.DISCONNECT_FAILED,
+    )
+
+
 def try_connect(device_name, try_time=2):
-  for i in range(try_time):
-    ret_code, bs = run_shell(f"{AlbatrossDevice.adb} connect {device_name}", timeout=default_connect_timeout)
-    if ret_code == OUT_TIME_CODE:
-      return False
-    if b'failed' not in bs:
-      if b'already' in bs:
-        return 'already connected'
+  # Kept for API compatibility.  A connection attempt is deliberately one-shot
+  # to avoid multiplying adb transport churn in callers that pass try_time > 1.
+  del try_time
+  endpoint = str(device_name).strip()
+  adb_connect_enabled = AdbConfig.adb_connect_enabled
+  if not endpoint or not adb_connect_enabled:
+    if endpoint and not adb_connect_enabled:
+      logger.info(f'adb connect {endpoint} disabled in this process')
+    return False
+  coordinator = AdbConfig.connection_coordinator
+  with coordinator.endpoint_lock(endpoint):
+    now = time.monotonic()
+    cooling_down, remaining = coordinator.in_cooldown(endpoint, now)
+    if cooling_down:
+      if coordinator.recent_connection_is_usable(endpoint, now):
+        coordinator.record_metric('connect_cooldown_reuses', endpoint)
+        logger.info(f'adb connect {endpoint} reused recent connection ({remaining:.1f}s remaining)')
+        return True
+
+      if not coordinator.in_connect_quarantine(endpoint, now):
+        coordinator.record_metric('connect_cooldown_skips', endpoint)
+        logger.info(f'adb connect {endpoint} skipped during cooldown ({remaining:.1f}s remaining)')
+        return False
+
+      recovery_due, probe_remaining = coordinator.recovery_probe_due(endpoint, now)
+      if (not AdbConfig.adb_tcp_probe_enabled
+          or parse_tcp_endpoint(endpoint) is None
+          or not recovery_due):
+        coordinator.record_metric('connect_cooldown_skips', endpoint)
+        coordinator.record_metric('recovery_probe_skips', endpoint)
+        logger.info(
+          f'adb connect {endpoint} remains quarantined '
+          f'({remaining:.1f}s quarantine, {probe_remaining:.1f}s recovery probe)'
+        )
+        return False
+      recovery_probe = True
+    else:
+      recovery_probe = False
+
+    if AdbConfig.adb_tcp_probe_enabled:
+      probe_started = time.monotonic()
+      tcp_open = probe_tcp_endpoint(endpoint, AdbConfig.adb_tcp_probe_timeout)
+      probe_elapsed_ms = (time.monotonic() - probe_started) * 1000
+      if tcp_open is not None:
+        coordinator.record_metric('tcp_probe_attempts', endpoint)
+        coordinator.record_metric(
+          'tcp_probe_successes' if tcp_open else 'tcp_probe_failures', endpoint,
+        )
+      if recovery_probe:
+        coordinator.record_metric('recovery_probe_attempts', endpoint)
+        coordinator.record_metric(
+          'recovery_probe_successes' if tcp_open else 'recovery_probe_failures', endpoint,
+        )
+        attempts, delay = coordinator.record_recovery_probe(
+          endpoint, time.monotonic(), tcp_open is True, probe_elapsed_ms,
+        )
+        if tcp_open is not True:
+          logger.info(
+            f'adb connect {endpoint} remains quarantined: recovery TCP probe failed '
+            f'(attempt {attempts}, next probe in {delay:.1f}s)'
+          )
+          return False
+      if tcp_open is False:
+        failures = coordinator.record_failure(
+          endpoint, time.monotonic(), AdbErrorCode.TCP_UNREACHABLE, probe_elapsed_ms,
+        )
+        logger.info(
+          f'adb connect {endpoint} skipped: TCP probe failed '
+          f'({failures} consecutive failures); '
+          f'quarantined for {coordinator.failure_quarantine:.0f}s'
+        )
+        if AdbConfig.adb_transport_owner:
+          _clear_transport(endpoint)
+        return False
+
+    with coordinator.semaphore:
+      coordinator.record_metric('connect_attempts', endpoint)
+      connect_result = run_adb_result("connect", endpoint, timeout=default_connect_timeout)
+      connected = _connect_response_matches(
+        endpoint, connect_result.return_code, connect_result.output,
+      )
+      verification = _verify_transport(endpoint) if connected else None
+      verified = connected and verification.ok
+
+    now = time.monotonic()
+    if connected and verified:
+      coordinator.record_success(
+        endpoint, now, elapsed_ms=connect_result.elapsed_ms + verification.elapsed_ms,
+      )
+      coordinator.record_metric('connect_successes', endpoint)
       return True
-    # return False
-    # if i < try_time - 1:
-    #   time.sleep(0.5)
-  return False
+
+    error_code = (
+      (connect_result.error_code if connect_result.error_code != AdbErrorCode.OK
+       else AdbErrorCode.COMMAND_FAILED)
+      if not connected else verification.error_code
+    )
+    elapsed_ms = connect_result.elapsed_ms + (verification.elapsed_ms if verification else 0)
+    failures = coordinator.record_failure(endpoint, now, error_code, elapsed_ms)
+    coordinator.record_metric('connect_failures', endpoint)
+    reason = 'connect response' if not connected else 'transport verification'
+    logger.info(
+      f'adb connect {endpoint} failed during {reason} error={error_code} '
+      f'({failures} consecutive failures); '
+      f'quarantined for {coordinator.failure_quarantine:.0f}s'
+    )
+    _clear_transport(endpoint)
+    return False
 
 
 def disconnect(device_name):
-  get_device_manager().devices.pop(device_name, None)
-  run_shell(f"{AlbatrossDevice.adb} disconnect {device_name}")
+  endpoint = str(device_name).strip()
+  if not endpoint:
+    return
+  device = _device_manager.get_cached_device(endpoint) if _device_manager is not None else None
+  if device is not None:
+    logger.info(f'disconnect cached device and clean known forwards: {endpoint}')
+  disconnected = _clear_transport(endpoint)
+  if disconnected is not None:
+    _record_disconnect_outcome(endpoint, disconnected)
+  return bool(disconnected)
 
 
 default_try_time = 3
 default_timeout = 2
 
 
-def check_device_alive(device_name, try_time=None):
+def probe_device_alive(device_name, try_time=None):
   if not try_time:
     try_time = default_try_time
-  if '.' in device_name:
+  if parse_tcp_endpoint(device_name) is not None:
     timeout = min(default_timeout * 2, 10)
   else:
     timeout = default_timeout
+  last_result = None
   for i in range(try_time):
-    ret_code, bs = run_shell(f"{AlbatrossDevice.adb} -s {device_name} shell echo ping", timeout=timeout)
-    if bs and bs.startswith(b'ping'):
-      return True
-    if '.' in device_name:
-      code, res = run_shell(f"{AlbatrossDevice.adb} connect {device_name}", timeout=3)
-      if b'failed' in res:
-        return False
-      if b'connected' in res:
-        timeout = 8 + default_timeout
-      else:
-        timeout += 1
+    last_result = run_adb_result("shell", "echo ping", device_id=device_name, timeout=timeout)
+    if last_result.ok and last_result.output.startswith(b'ping'):
+      return True, last_result
     if i < try_time - 1:
       time.sleep(0.5)
-  return False
+  return False, last_result
 
 
-if sys.platform.startswith('win'):
-  import hashlib
+def check_device_alive(device_name, try_time=None):
+  return probe_device_alive(device_name, try_time)[0]
 
 
-  def file_md5(file_path):
-    md5 = hashlib.md5()
-    try:
-      with open(file_path, 'rb') as f:
-        while chunk := f.read(8192):
-          md5.update(chunk)
-      return md5.hexdigest()
-    except IOError as e:
-      return None
-else:
-  def file_md5(file_path):
-    ret, ret_bs = run_shell('md5sum ' + file_path)
-    if ret == 0:
-      return ret_bs.decode().split()[0]
+def invalidate_device_health(device_name, reason='device_event'):
+  manager = _device_manager
+  if manager is not None:
+    manager.invalidate_health(device_name, reason)
+
+
+def file_md5(file_path):
+  md5 = hashlib.md5()
+  try:
+    with open(file_path, 'rb') as f:
+      while chunk := f.read(8192):
+        md5.update(chunk)
+    return md5.hexdigest()
+  except IOError as e:
     return None
+
 
 pkg_pattern = re.compile(r"package:([\w.]+)(?:\s+|$)")
 
@@ -217,6 +957,7 @@ class AlbatrossDevice(object):
   cached_ip = False
   usb_mode = True
   load_kpm_impl = None
+  support_kpm = False
 
   @cached_class_property
   def adb(self):
@@ -224,18 +965,17 @@ class AlbatrossDevice(object):
 
   def __init__(self, device_id):
     self.device_id = device_id
-    adb_path = AlbatrossDevice.adb
-    self.cmd = adb_path + " -s " + device_id + " "
-    shellcmd_list = [adb_path, "-s", device_id, "shell"]
-    self.shellcmd = ' '.join(shellcmd_list) + ' '
-    self.shellcmd_list = shellcmd_list
+    self._owned_forward_ports = set()
+    self._forward_lock = threading.RLock()
+    self._forward_closed = False
+    self._set_adb_transport(device_id)
     self.process_launch_callback = {}
     self.app_launch_count = {}
-    if '.' in device_id:
+    endpoint = parse_tcp_endpoint(device_id)
+    self.usb_mode = endpoint is None
+    if endpoint is not None:
       self.usb_mode = False
-      if ':' in device_id:
-        device_id, self.tcp_port = device_id.split(':')
-      self.connect_ip = device_id
+      self.connect_ip, self.tcp_port = endpoint
     else:
       if AlbatrossDevice.cached_ip:
         self.connect_ip = self.get_device_ip()
@@ -243,11 +983,21 @@ class AlbatrossDevice(object):
         if port:
           self.tcp_port = int(port)
 
+  def _set_adb_transport(self, device_id, server_port=None):
+    if server_port is None:
+      server_port = adb_server_port_for(device_id)
+    self.adb_device_id = device_id
+    self.adb_server_port = server_port
+    prefix = [AdbConfig.adb_path, '-P', str(server_port), '-s', device_id]
+    self.cmd = ' '.join(prefix) + ' '
+    self.shellcmd_list = prefix + ['shell']
+    self.shellcmd = ' '.join(self.shellcmd_list) + ' '
+
   @cached_property
   def mount_paths(self):
     return {}
 
-  def shell(self, cmd, timeout=None, su_cmd=False) -> list | str:
+  def shell(self, cmd, timeout=None, su_cmd=False, return_code=False) -> list | str | tuple:
     start_time = time.time()
     for i in range(4):
       shell_prefix = self.shellcmd_list
@@ -260,41 +1010,35 @@ class AlbatrossDevice(object):
           cmd = cmd.replace('"', '\\"')
           command = shell_prefix + [f"{self.su_file} -c \"{cmd}\""]
       else:
-        if sys.platform == 'win32' or True:
-          command = shell_prefix + [cmd]
-        else:
-          command = f'{self.shellcmd} "{cmd}"'
+        command = shell_prefix + [cmd]
       if timeout:
         ret = run_shell(command, timeout=timeout, shell=False)
       else:
         ret = run_shell(command, shell=False)
-      self.ret_code = ret[0]
+      ret_code = ret[0]
       result = ret[1].decode().strip()
       if 'not found' in result:
-        if f"device '{self.device_id}' not found" in result:
+        transport_id = getattr(self, 'adb_device_id', self.device_id)
+        if f"device '{transport_id}' not found" in result:
           if i < 1:
             continue
           if i < 2:
             time.sleep(0.2)
             continue
-          if not self.usb_mode:
-            if i < 3:
-              try_connect(self.device_id, try_time=1)
-              continue
-          elif self.connect_ip:
-            if '.' not in self.shellcmd:
-              if self.switch_to_ip_connect():
-                continue
-            elif self.switch_to_usb_connect():
-              continue
+          invalidate_device_health(self.device_id, 'device_not_found')
           raise DeviceOffline(self)
       elif 'error: device offline' in result:
+        invalidate_device_health(self.device_id, 'device_offline')
         raise DeviceOffline(self)
       end_time = time.time()
       cost = end_time - start_time
       if cost > 10:
         logger.info(f'device {self.device_id} run {cmd[:32]} cost {cost}s')
+      if return_code:
+        return ret_code, result
+      self.ret_code = ret_code
       return result
+
     raise DeviceOffline(self)
 
   @cached_property
@@ -303,30 +1047,14 @@ class AlbatrossDevice(object):
 
   def get_serial(self):
     device_id = self.device_id
-    if '.' not in device_id:
+    if parse_tcp_endpoint(device_id) is None:
       return device_id
     return self.getprop('ro.serialno')
 
   def device_alive(self, try_time=2):
-    get_devices()
     if self.usb_mode:
       return check_device_alive(self.device_id, try_time)
-    return check_device_alive(self.connect_ip, try_time)
-    # for i in range(try_time):
-    #   try:
-    #     ret_code, ret = run_shell(self.shellcmd + 'echo "ping"', timeout=2)
-    #     if b'ping' in ret:
-    #       return True
-    #   except:
-    #     pass
-    #   device_id = self.device_id
-    #   if '.' in device_id:
-    #     run_shell(AlbatrossDevice.adb + ' connect ' + device_id, timeout=2)
-    #     time.sleep(1)
-    # try:
-    #   return 'ping' == self.shell('echo "ping"', timeout=2)
-    # except:
-    #   return False
+    return check_device_alive(self.get_connect_device_id(), try_time)
 
   # ime_server=pkg/class
   def set_ime(self, ime_service, enable=True):
@@ -373,7 +1101,7 @@ class AlbatrossDevice(object):
     return False
 
   def back(self):
-    run_shell(self.shellcmd + 'input keyevent 4')
+    self.shell('input keyevent 4')
 
   reboot_callback = None
 
@@ -392,21 +1120,18 @@ class AlbatrossDevice(object):
         self.reboot_callback(self, reason)
       except:
         pass
-    run_shell(self.cmd + ' reboot')
+    self.adb_cmd('reboot')
     if wait_time > 0:
       time.sleep(wait_time)
 
   def screen_size(self, size=None):
     if size is None:
-      cmd = self.shellcmd + "wm size"
-      lines: str = run_shell(cmd)[1].decode("utf-8")
+      lines: str = self.shell("wm size")
       lines = lines.rsplit(':', maxsplit=1)[-1]
       width, height = re.findall("(\\d+)", lines)
       return int(width), int(height)
     else:
-      cmd = self.shellcmd + "wm size " + size
-      lines = run_shell(cmd)[1].decode("utf-8")
-      return lines
+      return self.shell('wm size ' + size)
 
   @cached_property
   def screen_width(self):
@@ -433,11 +1158,11 @@ class AlbatrossDevice(object):
     }
     return dirdict
 
-  def swipe(self, x1, y1, x2, y2, time=None):
-    cmd = self.shellcmd + "input swipe {} {} {} {}".format(int(x1), int(y1), int(x2), int(y2))
-    if time:
-      cmd += " {}".format(time)
-    run_shell(cmd)
+  def swipe(self, x1, y1, x2, y2, t=None):
+    cmd = "input swipe {} {} {} {}".format(int(x1), int(y1), int(x2), int(y2))
+    if t:
+      cmd += " {}".format(t)
+    return self.shell(cmd)
 
   def swipe_to(self, direction='up'):
     dirdict = self.swipe_direction
@@ -449,28 +1174,47 @@ class AlbatrossDevice(object):
     return True
 
   def adb_cmd(self, *args, **kwargs):
-    cmd_line = [self.cmd] + list(args)
-    cmd_line = " ".join(cmd_line)
-    return run_shell(cmd_line, **kwargs)
+    device_id = self.adb_device_id
+    server_port = getattr(self, 'adb_server_port', adb_server_port_for(device_id))
+    return run_adb(*args, device_id=device_id, server_port=server_port, **kwargs)
 
-  def forward_list(self):
-    lines = (self.adb_cmd("forward", "--list")[1].decode("utf-8").strip().splitlines())
-    return [line.strip().split() for line in lines]
+  def forward_list(self, timeout=10):
+    ret_code, output = self.adb_cmd("forward", "--list", timeout=timeout)
+    if ret_code != 0:
+      return []
+    ports = []
+    for line in output.decode("utf-8", errors="replace").strip().splitlines():
+      fields = line.strip().split()
+      if len(fields) != 3:
+        continue
+      s, l, r = fields
+      if s == getattr(self, 'adb_device_id', self.device_id):
+        ports.append([s, l, r])
+    return ports
 
-  def forward(self, local, remote, tcp=True):
-    if tcp:
-      local = "tcp:%d" % local
-    else:
-      local = "udp:%d" % local
-    ret_code, _ = self.adb_cmd("forward", local, remote)
-    return ret_code
+  def forward(self, local_port, remote, tcp=True, keep=False):
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      if getattr(self, '_forward_closed', False):
+        raise RuntimeError(f'device {self.device_id} is closed')
+      if tcp:
+        local = "tcp:%d" % local_port
+      else:
+        local = "udp:%d" % local_port
+      ret_code, _ = self.adb_cmd("forward", local, remote)
+      if ret_code == 0 and not keep:
+        self._owned_forward_ports.add(local_port)
+      return ret_code
 
   def connect(self):
-    run_shell(AlbatrossDevice.adb + ' connect ' + self.device_id, timeout=3)
+    return try_connect(self.device_id)
 
   def is_online(self):
-    devices = get_devices()
-    return self.device_id in devices
+    server_port = getattr(self, 'adb_server_port', adb_server_port_for(self.device_id))
+    devices = list_devices(server_port=server_port)[1]
+    return getattr(self, 'adb_device_id', self.device_id) in devices
 
   def is_adb_root(self):
     un_root = "Permission" in self.shell("rm /data/local/file_test")
@@ -501,10 +1245,6 @@ class AlbatrossDevice(object):
     on = self.is_selinux_on()
     if on:
       self.setenforce(False)
-    # cmd = self.shellcmd + "'{} shell -c \"".format(self.su_file) + cmd + "\"'"
-    # ret = run_shell(cmd, timeout=timeout)
-    # self.ret_code = ret[0]
-    # result = ret[1].decode().strip()
     try:
       result = self.shell(cmd, timeout)
       return result
@@ -533,7 +1273,7 @@ class AlbatrossDevice(object):
       return su_file
     for i in ["/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/su", "/system/bin/.ext/su",
               "/system/usr/we-need-root/su", "/data/local/xbin/su", "/data/local/bin/su", "/data/local/su"]:
-      ret_code, _ = run_shell(self.shellcmd + 'ls ' + i)
+      ret_code, _ = self.shell('ls ' + i, return_code=True)
       if ret_code == 0:
         return i
     return 'su'
@@ -607,6 +1347,23 @@ class AlbatrossDevice(object):
   def get_device_data(self, key, def_value=None):
     return self.device_config.get('data', {}).get(key, def_value)
 
+  def get_temp_data(self, data_key, def_value=None):
+    file_path = f'/data/local/tmp/key_{data_key}'
+    try:
+      res = self.shell(f'cat {file_path}', timeout=10)
+    except:
+      return def_value
+    if 'No such' in res:
+      return def_value
+    return res.strip()
+
+  def save_temp_data(self, data_key, value):
+    file_path = f'/data/local/tmp/key_{data_key}'
+    try:
+      self.shell(f'echo {value} > {file_path}', timeout=10)
+    except:
+      pass
+
   update_count = 0
 
   def flush_config(self):
@@ -621,7 +1378,10 @@ class AlbatrossDevice(object):
     device_config_path = self.device_config_path
     if os.path.exists(device_config_path):
       with open(device_config_path, 'r') as fp:
-        device_config = json.load(fp)
+        try:
+          device_config = json.load(fp)
+        except:
+          device_config = {}
     else:
       device_config = {}
     if not device_config:
@@ -641,7 +1401,7 @@ class AlbatrossDevice(object):
     if app_agent_name == 'random':
       app_agent_name = self.device_config['app_agent_name']
     dst = plugin_dir + app_agent_name
-    res = self.push_file(Configuration.app_agent_file, dst, mode='444', check=True)
+    res = self.push_file(Configuration.app_agent_file, dst, mode='444', file_type=self.file_type, check=True)
     if res:
       self.app_agent_updated = True
       self.create_dex_oat_dir(dst)
@@ -661,7 +1421,7 @@ class AlbatrossDevice(object):
     self.root_shell('rm -rf {}'.format(file_path))
     return self.ret_code == 0
 
-  def push_file(self, file, dst, check=False, mode=None, file_type=None, owner=None):
+  def push_file(self, file, dst, check=False, mode=None, file_type=None, owner=None, timeout=120):
     if not os.path.exists(file):
       return False
     md5_dst = file_md5(file)
@@ -685,8 +1445,8 @@ class AlbatrossDevice(object):
         return False
     if self.shell_user == 'shell' and md5_current is not None:
       self.delete_file(dst)
-    command = self.cmd + ' push "{}" "{}"'.format(file, dst)
-    ret_code, s = run_shell(command, timeout=120)
+    # command = self.cmd + ' push "{}" "{}"'.format(file, dst)
+    ret_code, s = self.adb_cmd('push', file, dst, timeout=timeout)
     res = ret_code == 0
     if res:
       if extra_cmds:
@@ -699,8 +1459,8 @@ class AlbatrossDevice(object):
         return True
     if self.is_root and self.shell_user == 'shell':
       tmp_path = '/data/local/tmp/' + md5_dst
-      command = self.cmd + ' push "{}" "{}"'.format(file, tmp_path)
-      ret_code, s = run_shell(command, timeout=120)
+      # command = self.cmd + ' push "{}" "{}"'.format(file, tmp_path)
+      ret_code, s = self.adb_cmd('push', file, tmp_path, timeout=120)
       res = ret_code == 0
       if res:
         command = self.root_shell(f'mkdir -p {os.path.dirname(dst)} && mv {tmp_path} {dst}')
@@ -713,7 +1473,7 @@ class AlbatrossDevice(object):
 
   def pidofs(self, cmd_line):
     pids = []
-    ret_code, ret = run_shell(self.shellcmd + f'\'ps -ef | grep "{cmd_line}"\'')
+    ret_code, ret = self.shell(f'ps -ef | grep "{cmd_line}"')
     if ret:
       ret = ret.decode()
       lines = ret.split('\n')
@@ -751,7 +1511,111 @@ class AlbatrossDevice(object):
 
   def __on_close(self, client):
     cached_property.delete(self, 'client')
+    self._remove_forward_if_unused(getattr(client, 'port', None))
+    invalidate_device_health(self.device_id, 'rpc_client_closed')
     logger.info('albatross server disconnected')
+
+  def _remove_forward_if_unused(self, port, timeout=10):
+    if port is None or getattr(self, '_closing', False):
+      return False
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      if port not in self._owned_forward_ports:
+        return False
+      for attr in ('client', 'system_server_client', 'system_server_subscriber'):
+        other = cached_property.get(self, attr)
+        if other is cached_property.nil_value or other is None:
+          continue
+        if getattr(other, 'port', None) == port and getattr(other, 'sock', None):
+          return False
+      return self.remove_forward_port(port, timeout=timeout)
+
+  def _cleanup_failed_forward(self, port, reason):
+    try:
+      removed = self._remove_forward_if_unused(port, timeout=2)
+      if removed:
+        logger.info('removed unused forward tcp:%s after %s on %s', port, reason, self.device_id)
+    except Exception:
+      logger.warning('failed to remove forward tcp:%s after %s on %s', port, reason, self.device_id)
+
+  def close_rpc_clients(self):
+    """Close cached local sockets without issuing device-scoped adb commands."""
+    self.reconnect = False
+    self._closing = True
+    cached_clients = []
+    for attr in ('system_server_subscriber', 'system_server_client', 'client'):
+      client = cached_property.pop(self, attr)
+      if client is not cached_property.nil_value and client is not None:
+        cached_clients.append(client)
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      ports = set(self._owned_forward_ports)
+    try:
+      for client in cached_clients:
+        port = getattr(client, 'port', None)
+        if port is not None:
+          ports.add(port)
+        callbacks = getattr(client, 'on_close_callbacks', None)
+        if isinstance(callbacks, dict):
+          callbacks.clear()
+        try:
+          client.shutdown()
+        except Exception:
+          try:
+            client.close()
+          except Exception:
+            pass
+    finally:
+      self._closing = False
+    return ports
+
+  def cleanup_forwards(self, ports=None, timeout=None):
+    """Best-effort cleanup for forwards whose local ports are already known."""
+    ports = set(self._owned_forward_ports if ports is None else ports)
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      for port in ports:
+        try:
+          if timeout is None:
+            removed = self.remove_forward_port(port)
+          else:
+            removed = self.remove_forward_port(port, timeout=timeout)
+          if removed is not False:
+            try:
+              owned_port = port if isinstance(port, int) else int(str(port).split(':', 1)[1])
+              self._owned_forward_ports.discard(owned_port)
+            except (TypeError, ValueError, IndexError):
+              pass
+        except Exception:
+          # remove_forward_port deliberately keeps failed ports owned. Keep
+          # cleanup best-effort so one bad transport does not block others.
+          continue
+
+  def prevent_new_forwards(self):
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      self._forward_closed = True
+
+  def is_closed(self):
+    return self._forward_closed
+
+  def close(self):
+    """Close cached RPC clients and remove all forwards owned by this device."""
+    self.prevent_new_forwards()
+    ports = self.close_rpc_clients()
+    self.cleanup_forwards(ports)
+    try:
+      self.remove_albatross_port()
+    except Exception:
+      pass
 
   def setenforce(self, on=False):
     if on:
@@ -816,6 +1680,7 @@ class AlbatrossDevice(object):
 
   albatross_client_impl = AlbatrossClient
   enable_kpm = True
+  hide_file = False
 
   def get_client(self) -> AlbatrossClient:
     if not self.is_root:
@@ -830,7 +1695,9 @@ class AlbatrossDevice(object):
       # else:
       server_port = self.device_config.get('server_port', 'localabstract:albatross_manager')
     if self.usb_mode or not os.environ.get('ALBATROSS_SOCKET_CONNECT'):
-      local_port = self.get_forward_port(server_port)
+      # Allocate the forward only after the device files and libraries have
+      # been prepared; failures in those steps must not leave a stale rule.
+      local_port = None
       host = '127.0.0.1'
     else:
       host = self.connect_ip
@@ -874,19 +1741,25 @@ class AlbatrossDevice(object):
         self.push_file(lib_src_32, lib_dst_32, mode='644', file_type=self.file_type)
         self.lib32_dst = lib_dst_32
 
+    if local_port is None:
+      local_port = self.get_forward_port(server_port)
+      if local_port is None:
+        raise RuntimeError(f'failed to allocate adb forward for {self.device_id}')
+
     def sync_lib():
       if self.anti_detection:
         if not self.enable_kpm:
-          kpm = False
+          support_kpm = False
         else:
-          kpm = client.support_extend_kpm()
-          if not kpm and self.load_kpm_impl:
+          support_kpm = client.support_extend_kpm()
+          if not support_kpm and self.load_kpm_impl:
             try:
               self.load_kpm_impl(self, client)
-              kpm = client.support_extend_kpm()
+              support_kpm = client.support_extend_kpm()
             except:
               pass
-        if self.sdk_version >= 29 and not kpm and os.path.exists(self.copy_script):
+        self.support_kpm = support_kpm
+        if self.sdk_version >= 29 and not support_kpm and self.hide_file:
           owner = 'root'
           lib_file_type = 'system_lib_file'
           jar_file_type = 'system_file'
@@ -895,22 +1768,22 @@ class AlbatrossDevice(object):
           mount_path_dir = None
           libs = []
           for m_dir in mount_path_dirs:
-            ret_code, ret_str = run_shell(self.shellcmd + 'ls -al ' + m_dir)
+            ret_code, ret_str = self.shell('ls -al ' + m_dir, return_code=True)
             if ret_code == 0:
               exists = []
               for i in ['lib64', 'lib']:
-                ret_code, ret_str = run_shell(self.shellcmd + 'ls -Zd ' + m_dir + i)
+                ret_code, ret_str = self.shell('ls -Zd ' + m_dir + i, return_code=True)
                 if ret_code != 0:
                   continue
-                res = re.findall('u:object_r:(\\w+):s0', ret_str.decode())
+                res = re.findall('u:object_r:(\\w+):s0', ret_str)
                 exists.append(i)
                 if res:
                   lib_file_type = res[0]
                   break
               if exists:
-                ret_code, ret_str = run_shell(self.shellcmd + 'ls -Zd ' + m_dir + 'framework')
+                ret_code, ret_str = self.shell('ls -Zd ' + m_dir + 'framework', return_code=True)
                 if ret_code == 0:
-                  res = re.findall('u:object_r:(\\w+):s0', ret_str.decode())
+                  res = re.findall('u:object_r:(\\w+):s0', ret_str)
                   if res:
                     jar_file_type = res[0]
                     if len(res) < 10:
@@ -1080,15 +1953,19 @@ class AlbatrossDevice(object):
     if update and self.update_kill:
       self.kill_process(server_dst_basename, 'update lib', reboot_count=5)
     else:
+      client = None
       try:
         client = self.albatross_client_impl(local_port, host, 'albatross-' + device_id, 1500)
         sync_lib()
         return client
       except Exception as e:
+        if client is not None:
+          client.close()
         old_pids = self.kill_process(server_dst_basename, 'connect fail:' + str(e), reboot_count=5)
         if old_pids:
           pids = self.pidof(server_dst_basename)
           if pids and old_pids == pids:
+            self._cleanup_failed_forward(local_port, 'server restart failure')
             self.reboot('kill albatross server fail')
             raise DeviceReboot(f'device {self.device_id} kill server fail')
     if type(server_port) == str and server_port.startswith('localabstract:'):
@@ -1099,10 +1976,24 @@ class AlbatrossDevice(object):
         cmd = f'{self.shellcmd} "LD_LIBRARY_PATH={lib_dir} {cmd_prefix} \'{server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &\'"'
       else:
         cmd = f'{self.shellcmd} \'LD_LIBRARY_PATH={lib_dir} {cmd_prefix} "{server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"\''
+      server_command = f'{server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &'
+      remote_command = f"LD_LIBRARY_PATH={lib_dir} nohup su -c '{server_command}'"
     else:
       cmd_prefix = "nohup "
       cmd = f'{self.shellcmd} "LD_LIBRARY_PATH={lib_dir} {cmd_prefix} {server_dst_path} {server_port} >/data/local/tmp/albatross.log 2>&1 &"'
-    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+      remote_command = (
+        f'LD_LIBRARY_PATH={lib_dir} nohup {server_dst_path} {server_port} '
+        '>/data/local/tmp/albatross.log 2>&1 &')
+    # process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    command = self.shellcmd_list + [remote_command]
+    try:
+      process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        shell=False, start_new_session=(os.name == 'posix'))
+    except BaseException:
+      self._cleanup_failed_forward(local_port, 'server process launch failure')
+      raise
+    client = None
+    client_connect_failed = True
     try:
       if self.usb_mode:
         time.sleep(2)
@@ -1122,14 +2013,50 @@ class AlbatrossDevice(object):
             raise
         else:
           client = self.albatross_client_impl(local_port, host, 'albatross-' + device_id, 500)
+      client_connect_failed = False
     finally:
-      process.terminate()
-    if self.is_selinux_on():
-      client.patch_selinux()
-    sync_lib()
-    if self.anti_detection:
-      self.hide_mount(client)
-    return client
+      if client_connect_failed:
+        if client is not None:
+          try:
+            client.close()
+          except Exception:
+            pass
+        self._cleanup_failed_forward(local_port, 'client connection failure')
+      try:
+        if os.name == 'posix':
+          os.killpg(process.pid, signal.SIGTERM)
+        else:
+          process.terminate()
+      except (ProcessLookupError, OSError):
+        pass
+      try:
+        process.wait(timeout=5)
+      except subprocess.TimeoutExpired:
+        try:
+          if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGKILL)
+          else:
+            process.kill()
+        except (ProcessLookupError, OSError):
+          pass
+        process.wait()
+      finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+          if stream is not None:
+            stream.close()
+    try:
+      if self.is_selinux_on():
+        client.patch_selinux()
+      sync_lib()
+      if self.anti_detection:
+        self.hide_mount(client)
+      return client
+    except BaseException:
+      try:
+        client.close()
+      finally:
+        self._cleanup_failed_forward(local_port, 'client initialization failure')
+      raise
 
   def hide_mount(self, client=None):
     if client is None:
@@ -1144,6 +2071,9 @@ class AlbatrossDevice(object):
             break
         if not carry_on:
           break
+    # if self.support_kpm:
+    #   for p in ['ap', 'apd', 'modules', 'service.d']:
+    #     client.hide_path('/data/adb/' + p)
     mount_paths = cached_property.get(self, 'mount_paths')
     if mount_paths and len(mount_paths) > 1:
       client.add_launch_umount(':'.join(mount_paths.keys()))
@@ -1179,12 +2109,14 @@ class AlbatrossDevice(object):
       except:
         pass
     cached_property.delete(self, "system_server_subscriber")
+    self._remove_forward_if_unused(getattr(client, 'port', None))
 
   def on_system_client_close(self, client):
     if self.reconnect:
       logger.info('system_server client close')
       if not client.reconnect():
         cached_property.delete(self, "system_server_client")
+        self._remove_forward_if_unused(getattr(client, 'port', None))
 
   @cached_property
   def brand(self):
@@ -1195,12 +2127,24 @@ class AlbatrossDevice(object):
   @cached_property
   def system_server_subscriber(self) -> SystemServerClient:
     port = self.get_forward_port(self.system_server_address)
+    if port is None:
+      raise RuntimeError(f'failed to allocate system-server forward for {self.device_id}')
     system_client_class = self.system_client_class_impl
-    subscribe_client = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
-    subscribe_client.add_close_listener(self.on_system_subscribe_close, 'system_subscribe')
-    subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
-    subscribe_client.subscribe()
-    return subscribe_client
+    subscribe_client = None
+    try:
+      subscribe_client = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
+      subscribe_client.add_close_listener(self.on_system_subscribe_close, 'system_subscribe')
+      subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
+      subscribe_client.subscribe()
+      return subscribe_client
+    except BaseException:
+      if subscribe_client is not None:
+        try:
+          subscribe_client.close()
+        except Exception:
+          pass
+      self._cleanup_failed_forward(port, 'system subscriber initialization failure')
+      raise
 
   system_client_class_impl = SystemServerClient
 
@@ -1216,7 +2160,7 @@ class AlbatrossDevice(object):
       self.create_dex_oat_dir(agent_dst)
       server_pid = client.get_process_pid('system_server')
       if server_pid > 0 and agent_dst in self.root_shell(f'cat /proc/{server_pid}/maps'):
-        if self.brand == DeviceBrand.RedMi:
+        if self.brand in [DeviceBrand.RedMi, DeviceBrand.Xiaomi]:
           self.reboot('agent update', 40)
           raise DeviceReboot(f'reboot device {self.device_id}')
         else:
@@ -1244,16 +2188,32 @@ class AlbatrossDevice(object):
       system_server_address = 'localabstract:' + system_server_address
       self.system_server_address = system_server_address
       port = self.get_forward_port(system_server_address)
-      system_server = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
-      system_server.init()
-      system_server.add_close_listener(self.on_system_client_close, 'system_disconnect')
+      if port is None:
+        raise RuntimeError(f'failed to allocate system-server forward for {self.device_id}')
+      system_server = None
+      try:
+        system_server = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
+        system_server.init()
+      except BaseException:
+        if system_server is not None:
+          try:
+            system_server.close()
+          except Exception:
+            pass
+        self._cleanup_failed_forward(port, 'system client initialization failure')
+        raise
       if self.auto_subscribe_system_server:
-        subscribe_client = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
-        subscribe_client.add_close_listener(self.on_system_subscribe_close, 'system_subscribe_close')
-        subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
-        subscribe_client.subscribe()
-        # system_server.set_intercept_app(None)
-        cached_property.reset(self, 'system_server_subscriber', subscribe_client)
+        subscribe_client = None
+        try:
+          subscribe_client = system_client_class(port, '127.0.0.1', 'system-' + self.device_id)
+          subscribe_client.register_broadcast_handler(subscribe_client.launch_process, self.on_launch_process)
+          subscribe_client.subscribe()
+          subscribe_client.add_close_listener(self.on_system_subscribe_close, 'system_subscribe_close')
+          # system_server.set_intercept_app(None)
+          cached_property.reset(self, 'system_server_subscriber', subscribe_client)
+        except BaseException:
+          logger.exception(f'device {self.device_id} get system server subscriber fail')
+      system_server.add_close_listener(self.on_system_client_close, 'system_disconnect')
       if res == DexLoadResult.DEX_LOAD_SUCCESS:
         system_inject_callback = self.system_inject_callback
         if system_inject_callback:
@@ -1310,6 +2270,18 @@ class AlbatrossDevice(object):
   app_inject_flags = InjectFlag.KEEP | InjectFlag.UNIX
   app_init_flags = AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN | AlbatrossInitFlags.FLAG_INIT_RPC
 
+  def add_init_flags(self, flag: AlbatrossInitFlags):
+    self.app_init_flags = self.app_init_flags | flag
+
+  def add_inject_flags(self, flag: InjectFlag):
+    old_flags = self.app_inject_flags
+    app_inject_flags = old_flags | flag
+    if old_flags != app_inject_flags:
+      self.app_inject_flags = app_inject_flags
+      client: AlbatrossClient = cached_property.get(self, 'client')
+      if client:
+        client.set_inject_flags(app_inject_flags, self.temp_path)
+
   def on_launch_process(self, uid: int, pid: int, pkg: str, process: str, process_info: dict) -> byte:
     logger.info(f'launch process {uid}:{pid}:{process} {process_info}')
     inject_record = self.process_launch_callback.get(uid)
@@ -1348,6 +2320,7 @@ class AlbatrossDevice(object):
 
   system_server_init_flags = 3
   system_server_restart_callback = None
+  temp_path = 'jit-cache'
 
   @cached_property
   def init_plugin_env(self):
@@ -1361,7 +2334,7 @@ class AlbatrossDevice(object):
         server_pid = client.get_process_pid('system_server')
         if self.update_kill_system_server and server_pid > 0 and agent_dst in self.root_shell(
             f'cat /proc/{server_pid}/maps'):
-          if self.brand == DeviceBrand.RedMi:
+          if self.brand in [DeviceBrand.RedMi, DeviceBrand.Xiaomi]:
             self.reboot('system server agent update', 40)
             raise DeviceReboot(f'reboot device {self.device_id}')
           else:
@@ -1375,6 +2348,8 @@ class AlbatrossDevice(object):
         AlbatrossInitFlags.NONE, None, self.system_server_init_flags)
       client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
         Configuration.albatross_agent_class, Configuration.albatross_register_func, self.app_init_flags)
+      if self.app_inject_flags != InjectFlag.KEEP | InjectFlag.UNIX:
+        client.set_inject_flags(self.app_inject_flags, self.temp_path)
       if not client.patch_selinux():
         self.setenforce(False)
       if system_server_restart_callback is not None:
@@ -1414,7 +2389,7 @@ class AlbatrossDevice(object):
     self.start_app(target_package)
     return True
 
-  def attach_with_plugins(self, package_or_pid, plugins, init_flags=None, extra_info=None):
+  def attach_with_plugins(self, package_or_pid, plugins, init_flags=None, extra_info=None, inject_flags=None):
     client = self.client
     uid = -1
     if isinstance(package_or_pid, str):
@@ -1427,8 +2402,13 @@ class AlbatrossDevice(object):
     success = []
     if pids and plugins:
       agent_dex = self.agent_dex
+      if inject_flags is None:
+        inject_flags = self.app_inject_flags
+      temp_dir = None
+      if inject_flags & InjectFlag.MEMFD:
+        temp_dir = self.temp_path
       for pid in pids:
-        res = client.inject_albatross(pid, self.app_inject_flags, None)
+        res = client.inject_albatross(pid, inject_flags, temp_dir)
         if res >= 0:
           if init_flags is None:
             init_flags = self.app_init_flags
@@ -1483,7 +2463,7 @@ class AlbatrossDevice(object):
       else:
         plugin_name = map_name
     plugin_dex_device = Configuration.app_plugin_home + plugin_name
-    is_update = self.push_file(plugin_dex, plugin_dex_device, mode='444', check=True)
+    is_update = self.push_file(plugin_dex, plugin_dex_device, file_type=self.file_type, mode='444', check=True)
     if plugin_lib:
       assert os.path.exists(plugin_lib), plugin_lib
       lib_name = os.path.basename(plugin_lib)
@@ -1587,45 +2567,124 @@ class AlbatrossDevice(object):
             success.append(pid)
     return success
 
-  def forward_tcp(self, local_port, device_port=None):
+  def forward_tcp(self, local_port, device_port=None, keep=False):
     if device_port is None:
       device_port = local_port
-    ret_code, _ = self.adb_cmd("forward", "tcp:%d" % local_port, "tcp:%d" % device_port)
-    return ret_code
+    return self.forward(local_port, "tcp:%d" % device_port, keep=keep)
 
   def remote_ports(self, remote_port):
-    device_name = self.device_id
+    device_name = getattr(self, 'adb_device_id', self.device_id)
     port_list = []
     if type(remote_port) == int:
       remote_port = 'tcp:' + str(remote_port)
     for s, lp, rp in self.forward_list():
       if rp == remote_port and s == device_name:
-        local_port = int(lp[4:])
+        if not lp.startswith(('tcp:', 'udp:')):
+          continue
+        try:
+          local_port = int(lp[4:])
+        except ValueError:
+          continue
         port_list.append(local_port)
     return port_list
 
   def get_forward_port(self, remote_port, not_check=True):
     if isinstance(remote_port, int):
       remote_port = 'tcp:' + str(remote_port)
-    for s, lp, rp in self.forward_list():
-      if rp == remote_port and s == self.device_id:
-        local_port = int(lp[4:])
-        if not_check or check_socket_port("127.0.0.1", local_port):
-          break
-    else:
-      with get_available_port() as local_port:
-        self.forward(local_port, remote_port)
-    return local_port
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      if getattr(self, '_forward_closed', False):
+        raise RuntimeError(f'device {self.device_id} is closed')
+      transport_id = getattr(self, 'adb_device_id', self.device_id)
+      for s, lp, rp in self.forward_list():
+        if rp != remote_port or s != transport_id or not lp.startswith('tcp:'):
+          continue
+        try:
+          local_port = int(lp[4:])
+        except ValueError:
+          continue
+        if not_check or is_socket_port_open("127.0.0.1", local_port):
+          return local_port
 
-  def remove_albatross_port(self):
-    for s, lp, rp in self.forward_list():
-      if re.findall('localabstract:albatross_\\d+', rp):
-        run_shell(self.cmd + 'forward --remove ' + lp)
+      ret_code, output = self.adb_cmd('forward', 'tcp:0', remote_port, timeout=10)
+      if ret_code == 0:
+        text = output.decode('utf-8', errors='replace').strip()
+        for line in reversed(text.splitlines()):
+          match = re.fullmatch(r'(?:tcp:)?(\d+)', line.strip())
+          if match:
+            local_port = int(match.group(1))
+            self._owned_forward_ports.add(local_port)
+            return local_port
+        for s, lp, rp in reversed(self.forward_list()):
+          if s == transport_id and rp == remote_port and lp.startswith('tcp:'):
+            try:
+              local_port = int(lp[4:])
+            except ValueError:
+              continue
+            self._owned_forward_ports.add(local_port)
+            return local_port
+        logger.warning('adb allocated a forward for %s but returned no local port', self.device_id)
+        return None
 
-  def remove_forward_port(self, port):
-    if isinstance(port, int):
-      port = 'tcp:' + str(port)
-    run_shell(self.cmd + 'forward --remove ' + port)
+      # Older adb versions may not support tcp:0. Release the reservation before
+      # invoking adb and retry only failed local binds a bounded number of times.
+      for _ in range(3):
+        with get_available_port() as local_port:
+          pass
+        if self.forward(local_port, remote_port) == 0:
+          return local_port
+      logger.warning('failed to allocate forward for %s', self.device_id)
+      return None
+
+  def remove_albatross_port(self, timeout=None):
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      if timeout is None:
+        forwards = self.forward_list()
+      else:
+        ret_code, output = self.adb_cmd("forward", "--list", timeout=timeout)
+        if ret_code != 0:
+          return
+        forwards = []
+        transport_id = getattr(self, 'adb_device_id', self.device_id)
+        for line in output.decode("utf-8", errors="replace").strip().splitlines():
+          fields = line.strip().split()
+          if len(fields) == 3 and fields[0] == transport_id:
+            forwards.append(fields)
+      transport_id = getattr(self, 'adb_device_id', self.device_id)
+      for s, lp, rp in forwards:
+        if re.findall('localabstract:albatross_\\d+', rp) and s == transport_id:
+          kwargs = {'timeout': timeout} if timeout is not None else {}
+          ret_code, _ = self.adb_cmd('forward', '--remove', lp, **kwargs)
+          if ret_code != 0:
+            continue
+          if lp.startswith('tcp:'):
+            try:
+              self._owned_forward_ports.discard(int(lp[4:]))
+            except ValueError:
+              pass
+
+  def remove_forward_port(self, port, timeout=10):
+    forward_lock = getattr(self, '_forward_lock', None)
+    if forward_lock is None:
+      forward_lock = self._forward_lock = threading.RLock()
+    with forward_lock:
+      if isinstance(port, int):
+        port = 'tcp:' + str(port)
+      kwargs = {'timeout': timeout} if timeout is not None else {}
+      ret_code, _ = self.adb_cmd('forward', '--remove', port, **kwargs)
+      if ret_code != 0:
+        return False
+      if isinstance(port, str) and ':' in port:
+        try:
+          self._owned_forward_ports.discard(int(port.split(':', 1)[1]))
+        except ValueError:
+          pass
+      return True
 
   def dumpui(self, path=None):
     try:
@@ -1633,12 +2692,9 @@ class AlbatrossDevice(object):
       if not ret_str.startswith("UI hierchary dumped to"):
         return False
       if path:
-        pull_cmd = self.cmd + "pull /data/local/tmp/uidump.xml {}".format(path)
-        run_shell(pull_cmd)
-        return True
+        return self.adb_cmd('pull', '/data/local/tmp/uidump.xml', path)[0] == 0
       else:
-        pull_cmd = self.shellcmd + " cat /data/local/tmp/uidump.xml"
-        return run_shell(pull_cmd)[1]
+        return self.shell('cat /data/local/tmp/uidump.xml')
     except:
       return False
 
@@ -1763,12 +2819,11 @@ class AlbatrossDevice(object):
         if ignore_gt:
           return False
         else:
-          self.uninstall_package(package)
-    if self.brand in [DeviceBrand.RealMe, DeviceBrand.OnePlus, DeviceBrand.OPPO]:
+          self.uninstall_package(package, f'version to is greater than target {version_code}')
+    if self.brand not in [DeviceBrand.Aosp, DeviceBrand.Google]:
       self.silence_install(apk)
     else:
-      res = self.adb_cmd('install -r -d -t ' + apk)
-    self.cached_versions.pop(package, None)
+      res = self.adb_cmd('install', '-r', '-d', '-t', apk)
     return True
 
   def get_user_packages(self, include_disabled=False, include_system=False):
@@ -1782,17 +2837,15 @@ class AlbatrossDevice(object):
     return pkg_pattern.findall(pkgs)
 
   def home(self):
-    cmd = self.shellcmd + "input keyevent 3"
-    run_shell(cmd)
+    return self.shell("input keyevent 3")
 
   def switch_app(self):
-    cmd = self.shellcmd + 'input keyevent KEYCODE_APP_SWITCH'
-    run_shell(cmd)
+    return self.shell('input keyevent KEYCODE_APP_SWITCH')
 
   @cached_property
   def sdk_version(self):
     try:
-      sdk = int(run_shell(self.shellcmd + "getprop ro.build.version.sdk")[1].decode().strip())
+      sdk = int(self.shell("getprop ro.build.version.sdk"))
       return sdk
     except:
       return cached_property.nil_value
@@ -1802,11 +2855,9 @@ class AlbatrossDevice(object):
   )
 
   def get_activity_stack(self, pkg=None):
-    cmd = self.cmd + 'shell " dumpsys activity | grep -i run"'
-    _, rstr = run_shell(cmd)
-    if b"Illegal" in rstr:
-      _, rstr = run_shell(cmd)
-    rstr = rstr.decode("utf-8")
+    rstr = self.shell("dumpsys activity | grep -i run")
+    if "Illegal" in rstr:
+      rstr = self.shell('dumpsys activity | grep -i run')
     if pkg:
       pattern = re.compile(
         r"Run\s#\d+:\sActivityRecord{\w+\s\w+\s(%s/[\w\.]+)" % (pkg)
@@ -1828,21 +2879,19 @@ class AlbatrossDevice(object):
         return result[-1]
     # cmd = self.cmd + 'shell "dumpsys activity | grep mFoc"'
     # cmd = self.cmd + 'shell  "dumpsys window | grep mCurrentFocus"'
-    # _, ret_str = run_shell(cmd)
-    # ret_str = ret_str.decode("utf-8")
     stack = self.get_activity_stack()
     if not stack:
-      cmd = self.cmd + 'shell " dumpsys activity | grep -i mResumedActivity"'
-      _, rstr = run_shell(cmd)
-      stack = resume_activity_pattern.findall(rstr.decode())
+      # cmd = self.cmd + 'shell " dumpsys activity | grep -i mResumedActivity"'
+      rstr = self.shell('dumpsys activity | grep -i mResumedActivity')
+      stack = resume_activity_pattern.findall(rstr)
     if stack:
       top_stack = stack[0].split("/")
       return top_stack[0], top_stack[1]
     return None, None
 
   def pull_file(self, src_android, dst_pc, is_del=False):
-    command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)
-    ret_code, res = run_shell(command)
+    # command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)
+    ret_code, res = self.adb_cmd('pull', src_android, dst_pc)
     if ret_code != 0:
       if 'Permission denied' in str(res) and self.is_root:
         self.shell('mkdir -p /data/local/tmp/pull')
@@ -1856,8 +2905,8 @@ class AlbatrossDevice(object):
         # if src_android[-1] != '/':
         #   command = self.cmd + ' pull "{}" "{}"'.format(dst_mv + '/' + os.path.basename(src_android), dst_pc)
         # else:
-        command = self.cmd + ' pull "{}" "{}"'.format(dst_mv, dst_pc)
-        ret_code, res = run_shell(command)
+        # command = self.cmd + ' pull "{}" "{}"'.format(dst_mv, dst_pc)
+        ret_code, res = self.adb_cmd('pull', dst_mv, dst_pc)
         self.root_shell('rm -rf {}'.format(dst_mv))
         if is_del:
           self.root_shell('rm -rf {}'.format(src_android))
@@ -1865,8 +2914,7 @@ class AlbatrossDevice(object):
       return False
     if not is_del:
       return True
-    del_command = self.shellcmd + " rm -rf " + src_android
-    ret_code, _ = run_shell(del_command)
+    ret_code, _ = self.shell('rm -rf ' + src_android, return_code=True)
     if ret_code == 0:
       return True
     else:
@@ -1883,42 +2931,40 @@ class AlbatrossDevice(object):
     return self.pull_file("/sdcard/screen.png", path)
 
   def get_package_uid(self, pkg):
-    ret_str = self.run_as_shell('dumpsys package ' + pkg + " | grep -E 'userId=|appId=' | head -n 20")  # uid=|
+    ret_str = self.run_as_shell(
+      'dumpsys package ' + pkg + " | grep -E 'userId=|appId=' | head -n 20 ; pm list package | grep " + pkg)  # uid=|
     res = re.findall(r'(?:appId|uid|userId)=(\d+)', ret_str)
-    if res and len(set(res)) == 1:
+    if res and len(set(res)) == 1 and 'package:' + pkg in ret_str:
       return int(res[0])
     return None
 
   def get_package_uid_and_version(self, pkg):
     ret_str = self.run_as_shell(
-      'dumpsys package ' + pkg + " | grep -E 'userId=|appId=|versionCode=' | head -n 20")  # uid=|
+      'dumpsys package ' + pkg + " | grep -E 'userId=|appId=|versionCode=' | head -n 20; pm list package | grep " + pkg)  # uid=|
     uid_match = re.findall(r'(?:appId|uid|userId)=(\d+)', ret_str)
     version_match = re.findall(r'versionCode=(\d+)', ret_str)
-    if version_match and len(version_match) < 3 and uid_match:
+    if version_match and len(version_match) < 3 and uid_match and 'package:' + pkg in ret_str:
       return int(uid_match[0]), int(version_match[0])
     return None, None
 
-  @cached_property
-  def cached_versions(self):
-    return {}
-
-  def get_package_version_code(self, pkg, cached=True):
-    cached_versions = self.cached_versions
-    if cached and pkg in cached_versions:
-      return cached_versions[pkg]
-    ret_str = self.run_as_shell('dumpsys package ' + pkg + " | grep versionCode= | head -n 10")
+  def get_package_version_code(self, pkg, cached=True, uninstall_corrupt=False):
+    ret_str = self.run_as_shell(
+      'dumpsys package ' + pkg + " | grep versionCode= | head -n 10 ; pm list package | grep " + pkg)
     if not ret_str:
       return False
     res = re.findall(r'versionCode=(\d+)', ret_str)
     if res and len(res) < 3:
       version = int(res[0])
-      cached_versions[pkg] = version
+      if 'package:' + pkg not in ret_str.split():
+        if uninstall_corrupt:
+          self.shell('pm uninstall ' + pkg)
+        return None
       return version
     return None
 
-  def uninstall_package(self, pkg):
-    self.cached_versions.pop(pkg, None)
-    self.adb_cmd(f'uninstall {pkg}')
+  def uninstall_package(self, pkg, reason=None):
+    logger.info(f'device {self.device_id}  uninstall {pkg} by {reason}')
+    self.adb_cmd(f'uninstall', pkg)
 
   def __repr__(self):
     return "Device: {}".format(self.device_id)
@@ -1944,11 +2990,10 @@ class AlbatrossDevice(object):
   def get_device_ip(self):
     ip_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
     for cmd in ['ip addr show wlan0', 'ifconfig wlan0', 'ip addr']:
-      ret_code, bs = run_shell(self.shellcmd + cmd)
-      if ret_code:
+      result = self.shell(cmd)
+      if self.ret_code:
         continue
-      s = bs.decode()
-      ips = re.findall(ip_pattern, s)
+      ips = re.findall(ip_pattern, result)
       # 过滤无效 IP（排除 0.0.0.0、127.0.0.1 等非局域网 IP）
       valid_ips = [
         ip for ip in ips
@@ -1963,9 +3008,7 @@ class AlbatrossDevice(object):
   tcp_port = 5555
 
   def get_connect_device_id(self):
-    if '.' not in self.cmd:
-      return self.device_id
-    return f'{self.connect_ip}:{self.tcp_port}'
+    return self.adb_device_id
 
   def update_ip(self):
     ip = self.get_device_ip()
@@ -1982,19 +3025,22 @@ class AlbatrossDevice(object):
       ip = self.connect_ip
     if not ip:
       return False
-    run_shell(f'{AlbatrossDevice.adb} -s {self.device_id} tcpip {self.tcp_port}')
+    usb_server_port = AdbConfig.adb_server_ports[0]
+    run_adb(
+      'tcpip', str(self.tcp_port), device_id=self.device_id,
+      server_port=usb_server_port,
+    )
     for z in range(2):
-      ret_code, bs = run_shell(AlbatrossDevice.adb + ' connect ' + ip + ":" + str(self.tcp_port))
-      if b'failed' not in bs and b'connected to' in bs:
-        cmd = f'{AlbatrossDevice.adb} -s {ip} '
-        shell_cmd = cmd + 'shell '
+      endpoint = ip + ":" + str(self.tcp_port)
+      if try_connect(endpoint):
         time.sleep(0.3)
         for i in range(2):
-          _, ret = run_shell(shell_cmd + 'echo hello')
+          server_port = adb_server_port_for(endpoint)
+          _, ret = run_adb(
+            'shell', 'echo hello', device_id=endpoint, server_port=server_port,
+          )
           if b'hello' in ret:
-            self.shellcmd = shell_cmd
-            self.shellcmd_list = shell_cmd.strip().split()
-            self.cmd = cmd
+            self._set_adb_transport(endpoint, server_port)
             self.connect_ip = ip
             return True
           elif not i:
@@ -2004,15 +3050,20 @@ class AlbatrossDevice(object):
   def switch_to_usb_connect(self):
     if not self.usb_mode:
       return False
-    if '.' in self.cmd:
-      cmd = f'{AlbatrossDevice.adb} -s {self.device_id} '
-      shellcmd = cmd + 'shell '
-      ret_code, bs = run_shell(shellcmd + 'echo hello')
+    if self.adb_device_id != self.device_id:
+      usb_server_port = AdbConfig.adb_server_ports[0]
+      ret_code, bs = run_adb(
+        'shell', 'echo hello', device_id=self.device_id,
+        server_port=usb_server_port,
+      )
       if b'hello' in bs:
-        self.cmd = cmd
-        self.shellcmd = shellcmd
-        self.shellcmd_list = shellcmd.strip().split()
-        run_shell(f'{AlbatrossDevice.adb} disconnect {self.connect_ip}:{self.tcp_port}')
+        self._set_adb_transport(self.device_id, usb_server_port)
+        endpoint = f'{self.connect_ip}:{self.tcp_port}'
+        if AdbConfig.adb_transport_owner:
+          disconnect_code, _ = _adb_disconnect(endpoint)
+          _record_disconnect_outcome(endpoint, disconnect_code == 0)
+        else:
+          logger.info(f'adb disconnect {endpoint} skipped in non-owner process')
         return True
     return False
 
@@ -2062,7 +3113,7 @@ class AlbatrossDevice(object):
   def silence_install(self, pkg_path, clear_cache=False, use_root=True, timeout=120):
     assert os.path.exists(pkg_path), pkg_path
     temp_path = '/data/local/tmp/' + os.path.basename(pkg_path)
-    self.push_file(pkg_path, temp_path)
+    self.push_file(pkg_path, temp_path, timeout=timeout + 120)
     if use_root:
       shell = self.root_shell
     else:
@@ -2206,72 +3257,267 @@ class DeviceManager:
 
   def __init__(self):
     self.devices = {}
+    self._lock = threading.RLock()
+    self._endpoint_locks = {}
+    self._health = {}
+    self._closed = False
+    self._metrics = {
+      'health_checks': 0,
+      'health_cache_hits': 0,
+      'health_failures': 0,
+      'health_invalidations': 0,
+      'device_creations': 0,
+    }
+
+  @contextmanager
+  def endpoint_lock(self, device_id):
+    with self._lock:
+      entry = self._endpoint_locks.get(device_id)
+      if entry is None:
+        entry = {'lock': threading.Lock(), 'users': 0}
+        self._endpoint_locks[device_id] = entry
+      entry['users'] += 1
+      lock = entry['lock']
+    try:
+      with lock:
+        yield
+    finally:
+      with self._lock:
+        entry['users'] -= 1
+        if entry['users'] == 0 and self._endpoint_locks.get(device_id) is entry:
+          self._endpoint_locks.pop(device_id, None)
+
+  def _record_health(self, device_id, alive, result=None, reason='probe'):
+    now = time.monotonic()
+    with self._lock:
+      self._metrics['health_checks'] += 1
+      if not alive:
+        self._metrics['health_failures'] += 1
+      self._health[device_id] = {
+        'alive': bool(alive),
+        'checked_at': now,
+        'expires_at': now + AdbConfig.device_health_ttl,
+        'error_code': result.error_code if result is not None else (
+          AdbErrorCode.OK if alive else AdbErrorCode.COMMAND_FAILED),
+        'return_code': result.return_code if result is not None else None,
+        'elapsed_ms': result.elapsed_ms if result is not None else None,
+        'reason': reason,
+        'server_port': adb_server_port_for(device_id),
+      }
+
+  def invalidate_health(self, device_id, reason='device_event'):
+    now = time.monotonic()
+    with self._lock:
+      self._metrics['health_invalidations'] += 1
+      previous = self._health.get(device_id, {})
+      self._health[device_id] = {
+        'alive': False,
+        'checked_at': now,
+        'expires_at': now,
+        'error_code': AdbErrorCode.COMMAND_FAILED,
+        'return_code': previous.get('return_code'),
+        'elapsed_ms': previous.get('elapsed_ms'),
+        'reason': reason,
+        'server_port': adb_server_port_for(device_id),
+      }
+
+  def _cached_health(self, device_id, now):
+    with self._lock:
+      device = self.devices.get(device_id)
+      health = self._health.get(device_id)
+      if health and health['expires_at'] > now:
+        self._metrics['health_cache_hits'] += 1
+        return health, device
+      return None, device
+
+  def health_snapshot(self):
+    now = time.monotonic()
+    with self._lock:
+      devices = {
+        device_id: {
+          'alive': health['alive'],
+          'age_seconds': max(0, now - health['checked_at']),
+          'ttl_remaining': max(0, health['expires_at'] - now),
+          'error_code': health['error_code'],
+          'return_code': health['return_code'],
+          'elapsed_ms': health['elapsed_ms'],
+          'reason': health.get('reason'),
+          'server_port': health.get('server_port', adb_server_port_for(device_id)),
+        }
+        for device_id, health in self._health.items()
+      }
+      servers = {}
+      for port in AdbConfig.adb_server_ports:
+        shard_devices = [health for health in devices.values() if health['server_port'] == port]
+        servers[port] = {
+          'device_count': len(shard_devices),
+          'alive_count': sum(1 for health in shard_devices if health['alive']),
+          'health_failures': sum(
+            1 for health in shard_devices if not health['alive']
+          ),
+        }
+      return {'metrics': dict(self._metrics), 'devices': devices, 'servers': servers}
 
   def get_cached_device(self, device_id):
-    return self.devices.get(device_id)
+    with self._lock:
+      return self.devices.get(device_id)
+
+  def pop_cached_device(self, device_id, clear_health=True):
+    with self._lock:
+      if clear_health:
+        self._health.pop(device_id, None)
+      return self.devices.pop(device_id, None)
 
   def remove_device(self, device_id):
-    return self.devices.pop(device_id, None)
+    with self.endpoint_lock(device_id):
+      device: AlbatrossDevice = self.pop_cached_device(device_id)
+      if device is not None:
+        device.close()
+      return device
+
+  def _evict_offline_device(self, device_id, probe_id):
+    stale = self.pop_cached_device(device_id, clear_health=False)
+    if AdbConfig.adb_transport_owner and parse_tcp_endpoint(probe_id) is not None:
+      coordinator = AdbConfig.connection_coordinator
+      if coordinator.disconnect_cleanup_due(probe_id, time.monotonic()):
+        disconnected = _clear_cached_transport(probe_id, stale)
+        if disconnected:
+          coordinator.record_failure(
+            probe_id, time.monotonic(), AdbErrorCode.COMMAND_FAILED,
+          )
+        else:
+          _record_disconnect_outcome(probe_id, False)
+        return
+    if stale is not None:
+      try:
+        stale.prevent_new_forwards()
+        ports = stale.close_rpc_clients()
+        stale.cleanup_forwards(ports, timeout=2)
+      except Exception:
+        logger.exception('failed to clean offline device %s', device_id)
+
+  def _get_device_singleflight(self, device_id, validate_transport):
+    with self._lock:
+      if self._closed:
+        raise RuntimeError('device manager is closed')
+    health, cached = self._cached_health(device_id, time.monotonic())
+    if health is not None:
+      if health['alive'] and cached is not None:
+        return cached
+      if not health['alive']:
+        raise DeviceOffline(device_id)
+    probe_id = device_id
+    if cached is not None and not cached.usb_mode:
+      probe_id = cached.get_connect_device_id()
+    if validate_transport:
+      list_result, devices = list_devices(
+        server_port=adb_server_port_for(probe_id),
+      )
+      if not list_result.ok:
+        logger.warning(
+          'adb devices failed error=%s code=%s elapsed_ms=%.1f',
+          list_result.error_code, list_result.return_code, list_result.elapsed_ms,
+        )
+        raise NoDeviceFound()
+      if not devices:
+        self._record_health(device_id, False, reason='adb_devices_missing')
+        self._evict_offline_device(device_id, probe_id)
+        raise NoDeviceFound()
+      if device_id not in devices:
+        self._record_health(device_id, False, reason='adb_devices_missing')
+        self._evict_offline_device(device_id, probe_id)
+        raise DeviceNoFindErr(device_id)
+    with self._lock:
+      cached = self.devices.get(device_id)
+    alive, result = probe_device_alive(probe_id, 2 if cached is None or cached.usb_mode else 3)
+    self._record_health(device_id, alive, result)
+    with self._lock:
+      if self._closed:
+        raise RuntimeError('device manager is closed')
+    if not alive:
+      self._evict_offline_device(device_id, probe_id)
+      raise DeviceOffline(device_id)
+    if cached is not None:
+      return cached
+    device = AlbatrossDevice(device_id)
+    with self._lock:
+      if self._closed:
+        should_close = True
+      else:
+        should_close = False
+        self.devices[device_id] = device
+        self._metrics['device_creations'] += 1
+    if should_close:
+      try:
+        device.close_rpc_clients()
+      except Exception:
+        pass
+      raise RuntimeError('device manager is closed')
+    return device
 
   def get_devices(self, device_id) -> AlbatrossDevice:
-    if device_id and ":" in device_id:
-      adb_path = AlbatrossDevice.adb
-      if device_id not in run_shell(adb_path + " devices")[1].decode():
-        if "." in device_id or "localhost" in device_id:
-          run_shell(adb_path + " connect " + device_id, timeout=default_connect_timeout)
-        else:
-          port = device_id.split(":")[1]
-          run_shell(adb_path + " connect 127.0.0.1:" + port, timeout=2)
-    devices = get_devices()
+    if device_id:
+      with self.endpoint_lock(device_id):
+        return self._get_device_singleflight(device_id, AdbConfig.adb_connect_enabled)
+
+    list_result, devices = list_devices()
+    if not list_result.ok:
+      logger.warning(
+        'adb devices failed error=%s code=%s elapsed_ms=%.1f',
+        list_result.error_code, list_result.return_code, list_result.elapsed_ms,
+      )
+      raise NoDeviceFound()
     if not devices:
       raise NoDeviceFound()
-    if device_id:
-      if device_id not in devices:
-        raise DeviceNoFindErr(device_id)
-    else:
-      device_id = devices[0]
-      if len(devices) > 1:
-        logger.info("more than one device,default choose device " + device_id)
-    device_tables = self.devices
-    if device_id in device_tables:
-      device = device_tables[device_id]
-      if device.check_alive():
-        return device
-    if not check_device_alive(device_id):
-      raise DeviceOffline(device_id)
-    device = AlbatrossDevice(device_id)
-    device_tables[device_id] = device
-    return device
+    device_id = devices[0]
+    if len(devices) > 1:
+      logger.info("more than one device,default choose device " + device_id)
+    with self.endpoint_lock(device_id):
+      return self._get_device_singleflight(device_id, False)
+
+  def close_all(self):
+    with self._lock:
+      self._closed = True
+      devices = list(self.devices.values())
+      self.devices.clear()
+      self._health.clear()
+    for device in devices:
+      try:
+        device.close()
+      except Exception:
+        logger.exception('failed to close cached device %s', device.device_id)
 
 
 _device_manager: DeviceManager | None = None
+_device_manager_lock = threading.RLock()
 
 
 def get_device_manager() -> "DeviceManager":
   global _device_manager
-  if _device_manager is None:
-    _device_manager = DeviceManager()
-  return _device_manager
+  with _device_manager_lock:
+    if _device_manager is None:
+      _device_manager = DeviceManager()
+    return _device_manager
+
+
+def get_device_health():
+  manager = _device_manager
+  if manager is None:
+    return {
+      'metrics': {},
+      'devices': {},
+      'servers': {
+        port: {'device_count': 0, 'alive_count': 0, 'health_failures': 0}
+        for port in AdbConfig.adb_server_ports
+      },
+    }
+  return manager.health_snapshot()
 
 
 def destroy_device():
   global _device_manager
-  if _device_manager is not None:
-    devices = _device_manager.devices
-    for device_id, device in devices.items():
-      device: AlbatrossDevice
-      device.reconnect = False
-      system_server_subscriber = cached_property.pop(device, 'system_server_subscriber')
-      if system_server_subscriber != cached_property.nil_value:
-        system_server_subscriber.close()
-      system_server_client = cached_property.pop(device, 'system_server_client')
-      if system_server_client is not cached_property.nil_value:
-        system_server_client.close()
-        device.remove_forward_port(system_server_client.port)
-      client = cached_property.pop(device, 'client')
-      if client is not cached_property.nil_value:
-        client.close()
-        device.remove_forward_port(client.port)
-    devices.clear()
-
+  with _device_manager_lock:
+    manager = _device_manager
     _device_manager = None
+  if manager is not None:
+    manager.close_all()

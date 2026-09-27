@@ -22,7 +22,7 @@ from .rpc_common import u32, logger
 from .wrapper import cached_class_property
 
 
-class InjectFlag(IntEnum):
+class InjectFlag(IntFlag):
   NOTHING = 0
   DEBUG = 0x1
   ANDROID = 0x2,
@@ -31,6 +31,7 @@ class InjectFlag(IntEnum):
   KEEP = 0x10
   UNIX = 0x20
   SOCKET = 0x40
+  MEMFD = 0x80
 
 
 class AlbatrossInitFlags(IntFlag):
@@ -659,14 +660,26 @@ class AlbatrossClient(RpcClient):
 
   @rpc_api
   def support_extend_kpm(self) -> bool:
-    pass
+    """
+  need load extend kpm,if load,return true.
+    """
 
   @rpc_api
   def hide_path(self, path: str, uid: u32 = 10000) -> bool:
+    """
+  need load extend kpm
+    """
+
+  @rpc_api
+  def redirect_path(self, uid: u32, src_path: str, dst_path: str) -> bool:
     pass
 
   @rpc_api
   def set_dex_load_timeout(self, sec: u32) -> int:
+    pass
+
+  @rpc_api
+  def set_inject_flags(self, inject_flags: InjectFlag, temp_path: str) -> bool:
     pass
 
   @staticmethod

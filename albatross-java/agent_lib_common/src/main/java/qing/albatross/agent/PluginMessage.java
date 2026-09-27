@@ -67,10 +67,14 @@ public class PluginMessage {
 
     @MethodHook
     private static void log(AlbatrossPlugin plugin, String msg) {
-      if (rollingLogger != null) {
-        rollingLogger.log(plugin.getClass().getName() + ": " + msg);
-      } else if (appLogger != null) {
-        appLogger.log(plugin.getClass().getName() + ": " + msg);
+      BufferedDailyRollingLogger rolling = rollingLogger;
+      if (rolling != null) {
+        rolling.log(plugin.getClass().getName() + ": " + msg);
+      } else {
+        BufferedDailyRollingLogger app = appLogger;
+        if (app != null) {
+          app.log(plugin.getClass().getName() + ": " + msg);
+        }
       }
     }
   }
@@ -84,11 +88,13 @@ public class PluginMessage {
   }
 
   static UnixRpcInstance instance;
-  static BufferedDailyRollingLogger rollingLogger;
-  static BufferedDailyRollingLogger appLogger;
+  private static final Object LOGGER_CONFIG_LOCK = new Object();
+  static volatile BufferedDailyRollingLogger rollingLogger;
+  static volatile BufferedDailyRollingLogger appLogger;
 
   public static boolean isLogInit() {
-    return rollingLogger != null;
+    BufferedDailyRollingLogger logger = rollingLogger;
+    return logger != null && !logger.isClosed();
   }
 
 
@@ -109,8 +115,9 @@ public class PluginMessage {
 
     @MethodHook
     private static void log(Object plugin, String msg) {
-      if (rollingLogger != null) {
-        rollingLogger.log(plugin.getClass().getName() + ":" + msg);
+      BufferedDailyRollingLogger rolling = rollingLogger;
+      if (rolling != null) {
+        rolling.log(plugin.getClass().getName() + ":" + msg);
       }
     }
   }
@@ -126,28 +133,35 @@ public class PluginMessage {
   }
 
   public static void log(String msg) {
-    if (rollingLogger != null) {
-      rollingLogger.log(msg);
+    BufferedDailyRollingLogger rolling = rollingLogger;
+    if (rolling != null) {
+      rolling.log(msg);
     } else {
       Log.i(TAG, msg);
     }
   }
 
   public static void appLog(String msg) {
-    if (appLogger != null)
-      appLogger.log(msg);
-    else if (rollingLogger != null)
-      rollingLogger.log(msg);
+    BufferedDailyRollingLogger app = appLogger;
+    if (app != null) {
+      app.log(msg);
+    } else {
+      BufferedDailyRollingLogger rolling = rollingLogger;
+      if (rolling != null) {
+        rolling.log(msg);
+      }
+    }
   }
 
   public static void send(String msg, Throwable tr) {
     if (instance == null || instance.getSubscriberSize() <= 0) {
-      if (rollingLogger != null) {
+      BufferedDailyRollingLogger rolling = rollingLogger;
+      if (rolling != null) {
         StringWriter sw = new StringWriter();
         PrintWriter pw = new PrintWriter(sw);
         tr.printStackTrace(pw);
         String desc = sw.toString();
-        rollingLogger.log(msg + "\nexception:\n" + desc);
+        rolling.log(msg + "\nexception:\n" + desc);
       } else
         Log.i(TAG, msg, tr);
       return;
@@ -179,59 +193,71 @@ public class PluginMessage {
   public static final int LOG_MAX_FILE_SIZE = 1024 * 1024 * 2;
 
   public static void setLogger(String logDir, String baseName, boolean clean) {
-    if (instance == null) {
-      return;
-    }
-    if (rollingLogger != null) {
-      rollingLogger.close();
-      rollingLogger = null;
-    }
-    if (logDir != null && logDir.length() > 1) {
-      File logFile = new File(logDir);
-      if (!logFile.exists()) {
-        if (!logFile.mkdirs()) {
-          Albatross.log("create log dir:" + logDir + " fail");
+    synchronized (LOGGER_CONFIG_LOCK) {
+      if (instance == null) {
+        return;
+      }
+      BufferedDailyRollingLogger oldLogger = rollingLogger;
+      if (oldLogger != null) {
+        oldLogger.close();
+        // Never clean/reopen the same path while the old writer still owns
+        // an open descriptor after the five-second close deadline.
+        if (!oldLogger.isClosed()) {
           return;
         }
-      } else if (clean) {
-        BufferedDailyRollingLogger.cleanupLogFiles(logFile, baseName);
+        rollingLogger = null;
       }
-      try {
-        rollingLogger = new BufferedDailyRollingLogger(logFile, baseName, LOG_MAX_FILE_SIZE);
-      } catch (IOException e) {
-        Albatross.log("create log fail", e);
-      }
-    } else {
-      try {
-        File logDirPath;
-        Application context = Albatross.currentApplication();
-        if (context == null) {
-          if (AppMetaInfo.packageName == null) {
-            Albatross.log("can not create logger without application");
+      if (logDir != null && logDir.length() > 1) {
+        File logFile = new File(logDir);
+        if (!logFile.exists()) {
+          if (!logFile.mkdirs()) {
+            Albatross.log("create log dir:" + logDir + " fail");
             return;
           }
-          logDirPath = new File("/data/data/" + AppMetaInfo.packageName + "/files/log");
-        } else {
-          File fieldDir = context.getFilesDir();
-          logDirPath = new File(fieldDir, "log");
+        } else if (clean) {
+          BufferedDailyRollingLogger.cleanupLogFiles(logFile, baseName);
         }
-        if (logDirPath.exists()) {
-          if (clean)
-            BufferedDailyRollingLogger.cleanupLogFiles(logDirPath, baseName);
-        } else
-          logDirPath.mkdirs();
-        rollingLogger = new BufferedDailyRollingLogger(logDirPath, baseName, LOG_MAX_FILE_SIZE);
-      } catch (IOException e) {
-        Albatross.log("create log fail", e);
+        try {
+          rollingLogger = new BufferedDailyRollingLogger(logFile, baseName, LOG_MAX_FILE_SIZE);
+        } catch (IOException e) {
+          Albatross.log("create log fail", e);
+        }
+      } else {
+        try {
+          File logDirPath;
+          Application context = Albatross.currentApplication();
+          if (context == null) {
+            if (AppMetaInfo.packageName == null) {
+              Albatross.log("can not create logger without application");
+              return;
+            }
+            logDirPath = new File("/data/data/" + AppMetaInfo.packageName + "/files/log");
+          } else {
+            File fieldDir = context.getFilesDir();
+            logDirPath = new File(fieldDir, "log");
+          }
+          if (logDirPath.exists()) {
+            if (clean)
+              BufferedDailyRollingLogger.cleanupLogFiles(logDirPath, baseName);
+          } else if (!logDirPath.mkdirs() && !logDirPath.isDirectory()) {
+            Albatross.log("create log dir:" + logDirPath + " fail");
+            return;
+          }
+          rollingLogger = new BufferedDailyRollingLogger(logDirPath, baseName, LOG_MAX_FILE_SIZE);
+        } catch (IOException e) {
+          Albatross.log("create log fail", e);
+        }
       }
     }
   }
 
   public static void flushLog() {
-    if (rollingLogger != null)
-      rollingLogger.flush();
-    if (appLogger != null)
-      appLogger.flush();
+    BufferedDailyRollingLogger rolling = rollingLogger;
+    if (rolling != null)
+      rolling.flush();
+    BufferedDailyRollingLogger app = appLogger;
+    if (app != null)
+      app.flush();
   }
 
   static class MessageSender extends Thread {
@@ -259,49 +285,68 @@ public class PluginMessage {
   }
 
   public static boolean redirectLog(String fileName) {
-    if (appLogger != null)
-      return false;
-    Application application = Albatross.currentApplication();
-    File logDIr;
-    if (application == null) {
-      String packageName = AppMetaInfo.packageName;
-      if (packageName == null) {
+    synchronized (LOGGER_CONFIG_LOCK) {
+      if (appLogger != null)
+        return false;
+      Application application = Albatross.currentApplication();
+      File logDIr;
+      if (application == null) {
+        String packageName = AppMetaInfo.packageName;
+        if (packageName == null) {
+          return false;
+        }
+        logDIr = new File("/data/data/" + packageName + "/files/log");
+      } else {
+        logDIr = new File(application.getFilesDir(), "log");
+      }
+      BufferedDailyRollingLogger newLogger = null;
+      boolean transactionStarted = false;
+      try {
+        if (!logDIr.exists() && !logDIr.mkdirs() && !logDIr.isDirectory()) {
+          throw new IOException("create log dir fail: " + logDIr);
+        }
+        newLogger = new BufferedDailyRollingLogger(logDIr,
+            fileName + "_" + Albatross.currentProcessName(), 1024 * 1024 * 2);
+        Albatross.transactionBegin();
+        transactionStarted = true;
+        Albatross.hookObject(PrintStreamH.class, System.out);
+        Albatross.hookClass(LogH.class);
+        Albatross.transactionEnd(true);
+        appLogger = newLogger;
+        return true;
+      } catch (Exception e) {
+        if (transactionStarted) {
+          Albatross.transactionEnd(false);
+        }
+        if (newLogger != null) {
+          newLogger.close();
+        }
+        Albatross.log("create app logger fail", e);
         return false;
       }
-      logDIr = new File("/data/data/" + packageName + "/files/log");
-    } else {
-      logDIr = new File(application.getFilesDir(), "log");
-    }
-    try {
-      if (!logDIr.exists())
-        logDIr.mkdirs();
-      appLogger = new BufferedDailyRollingLogger(logDIr, fileName + "_" + Albatross.currentProcessName(), 1024 * 1024 * 2);
-      Albatross.transactionBegin();
-      Albatross.hookObject(PrintStreamH.class, System.out);
-      Albatross.hookClass(LogH.class);
-      Albatross.transactionEnd(true);
-      return true;
-    } catch (Exception e) {
-      Albatross.transactionEnd(false);
-      Albatross.log("create app logger fail", e);
-      return false;
     }
   }
 
   public static boolean cancelRedirectLog() {
-    if (appLogger == null)
-      return false;
-    PrintStreamH.flush();
-    appLogger.log("appLogger finish log mark");
-    appLogger.close();
-    try {
-      Albatross.unhookClass(PrintStreamH.class, System.out.getClass());
-      Albatross.unhookClass(LogH.class);
-    } catch (AlbatrossErr e) {
-      throw new RuntimeException(e);
+    synchronized (LOGGER_CONFIG_LOCK) {
+      BufferedDailyRollingLogger logger = appLogger;
+      if (logger == null)
+        return false;
+      PrintStreamH.flush();
+      logger.log("appLogger finish log mark");
+      logger.close();
+      if (!logger.isClosed()) {
+        return false;
+      }
+      try {
+        Albatross.unhookClass(PrintStreamH.class, System.out.getClass());
+        Albatross.unhookClass(LogH.class);
+      } catch (AlbatrossErr e) {
+        throw new RuntimeException(e);
+      }
+      appLogger = null;
+      return true;
     }
-    appLogger = null;
-    return true;
   }
 
 

@@ -1,3 +1,11 @@
+version 3.6.0
+- Add the InjectApi interface and InjectAgentBase with a Python inject_client, exposing a unified inject API to the inject agent.
+- Add adb connection management: adb server / endpoint probing, device listing, a connection coordinator with cooldown, failure quarantine and recovery probing, plus connection metrics and a health snapshot.
+- Rework the native logger: bounded queue, batched disk writes, daily rolling with retention, and dropped / IO-error reporting.
+- Add thread hook utilities: ThreadDumper, and hooks for the thread pool executor and uncaught throwables.
+- Add inject flags and path redirection to the inject agent; make destroy idempotent and register it with atexit.
+- Kill the whole process group when a shell command times out.
+
 version 3.5.0
 - Add class hook APIs: hook_class / unhook_class with static, instance and constructor scope, and a safe tostring option.
 - Add native library monitoring APIs: get modules / functions, watch function, watch library load, dump native method and the onLibLoad callback.

@@ -1,7 +1,7 @@
 import time
 
 import albatross
-from albatross.albatross_client import AlbatrossInitFlags
+from albatross.albatross_client import AlbatrossInitFlags, InjectFlag
 from albatross.app_client import AppClient
 from albatross.common import Configuration
 from albatross.rpc_common import void, rpc_api
@@ -14,12 +14,21 @@ class DemoClient(AppClient):
     pass
 
 
-def main(device_id=None):
+def main(device_id=None, anti_detection=False):
   device = albatross.get_device(device_id)
   assert device.is_root
   device.wake_up()
   device.home()
   device.remove_albatross_port()
+  if anti_detection:
+    device.anti_detection = True
+    device.add_init_flags(AlbatrossInitFlags.FLAG_ANTI_DETECTION)
+    # 加载无痕hook的代码逻辑
+    # device.load_kpm_impl=xxx
+    if not device.support_kpm:
+      # 没有加载kpm,则memfd注入隐藏,过不了crc检测
+      device.add_inject_flags(InjectFlag.MEMFD)
+
   user_pkgs = device.get_user_packages()
   plugin_apk = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"

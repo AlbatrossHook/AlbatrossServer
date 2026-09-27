@@ -13,12 +13,13 @@
 # limitations under the License.
 
 from .albatross_client import AlbatrossClient, InjectFlag, AlbatrossInitFlags
-from .rpc_client import rpc_api, broadcast_api, byte, RpcClient
+from .inject_client import BaseClient
+from .rpc_client import rpc_api, broadcast_api, byte
 from .rpc_common import void, logger
 from .wrapper import cached_class_property
 
 
-class SystemServerClient(RpcClient):
+class SystemServerClient(BaseClient):
   albatross_client: AlbatrossClient
 
   @cached_class_property
@@ -171,6 +172,14 @@ class SystemServerClient(RpcClient):
 
   @rpc_api
   def allow_app_permission(self, pkg: str, permission_name: str, uid: int) -> str:
+    pass
+
+  @rpc_api
+  def mock_battery_info(self, on: bool) -> void:
+    pass
+
+  @rpc_api
+  def mock_lock(self) -> bool:
     pass
 
   @rpc_api

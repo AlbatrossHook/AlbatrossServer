@@ -1,7 +1,7 @@
 import time
 
 import albatross
-from albatross.albatross_client import AlbatrossInitFlags
+from albatross.albatross_client import AlbatrossInitFlags, InjectFlag
 from albatross.app_client import AppClient
 from albatross.common import Configuration
 from albatross.rpc_common import rpc_api, void
@@ -14,18 +14,28 @@ class DemoClient(AppClient):
     pass
 
 
-def main(device_id=None):
+def main(device_id=None, anti_detection=False):
   device = albatross.get_device(device_id)
   assert device.is_root
   device.wake_up()
+
+  app_init_flags = AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN
+  if not device.debuggable:
+    app_init_flags |= AlbatrossInitFlags.REDIRECT_LOG
+  if anti_detection:
+    app_init_flags |= AlbatrossInitFlags.FLAG_ANTI_DETECTION
+    device.anti_detection = True
+    device.add_init_flags(AlbatrossInitFlags.FLAG_ANTI_DETECTION)
+    # 加载无痕hook的代码逻辑
+    # device.load_kpm_impl=xxx
+    if not device.support_kpm:
+      device.add_inject_flags(InjectFlag.MEMFD)
+
   user_pkgs = device.get_user_packages()
   plugin_dex = Configuration.resource_dir + "plugins/plugin_demo.dex"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
 
-  app_init_flags = AlbatrossInitFlags.FLAG_LOG | AlbatrossInitFlags.FLAG_CALL_CHAIN
-  if not device.debuggable:
-    app_init_flags |= AlbatrossInitFlags.REDIRECT_LOG
   for pkg in user_pkgs:
     # if 'albatross' in pkg and 'inject_demo' not in pkg:
     #   continue
@@ -74,4 +84,4 @@ def main(device_id=None):
 
 
 if __name__ == '__main__':
-  main()
+  main(anti_detection=True)

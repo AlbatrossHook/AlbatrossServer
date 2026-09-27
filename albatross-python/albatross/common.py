@@ -13,6 +13,8 @@
 # limitations under the License.
 import logging
 import os
+import shutil
+import signal
 from pathlib import Path
 
 import toml
@@ -24,6 +26,7 @@ OUT_TIME_CODE = 996
 FAULT_CODE = 997
 import random
 import string
+
 logger = logging.getLogger("albatross")
 
 lib_origin_name = 'libalbatross_base.so'
@@ -74,10 +77,29 @@ def generate_random_variable_name(length=None, min_length=1, max_length=20, unde
 
 
 def run_shell(cmd, timeout=20, split=False, shell=True):
+  cmdshell = None
   try:
     cmdshell = subprocess.Popen(
-      cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
-    stdout, stderr = cmdshell.communicate(timeout=timeout)
+      cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell,
+      start_new_session=(os.name == 'posix'))
+    try:
+      stdout, stderr = cmdshell.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+      # Killing only the shell leaves adb/shell descendants running.  Start
+      # commands in their own session so the whole timed-out command is
+      # terminated and reaped.
+      try:
+        if os.name == 'posix':
+          os.killpg(cmdshell.pid, signal.SIGKILL)
+        else:
+          cmdshell.kill()
+      except (ProcessLookupError, OSError):
+        pass
+      try:
+        cmdshell.communicate()
+      except Exception:
+        pass
+      return OUT_TIME_CODE, b""
     if stdout and stderr:
       lines = ERROR_SPLIT2.join([stdout, stderr])
     elif stderr:
@@ -87,10 +109,28 @@ def run_shell(cmd, timeout=20, split=False, shell=True):
     if split:
       return cmdshell.returncode, re.split("[\r\n]+", lines.decode("utf-8").strip())
     return cmdshell.returncode, lines
-  except subprocess.TimeoutExpired as e:
-    return OUT_TIME_CODE, b""
   except Exception as e:
     return FAULT_CODE, str(e).encode()
+
+
+def resolve_adb(configured='adb', environ=None, executable=None):
+  environ = os.environ if environ is None else environ
+  path = os.path.expanduser(os.path.expandvars(str(configured)))
+  resolved = shutil.which(path)
+  if resolved:
+    return resolved
+  if os.path.isfile(path):
+    return os.path.abspath(path)
+  if executable is None:
+    executable = 'adb.exe' if os.name == 'nt' else 'adb'
+  for env_name in ('ANDROID_SDK_ROOT', 'ANDROID_HOME'):
+    sdk_root = environ.get(env_name)
+    if not sdk_root:
+      continue
+    candidate = os.path.join(os.path.expanduser(os.path.expandvars(sdk_root)), 'platform-tools', executable)
+    if os.path.isfile(candidate):
+      return os.path.abspath(candidate)
+  return None
 
 
 class Configuration(object):
@@ -139,17 +179,11 @@ class Configuration(object):
 
   @cached_class_property
   def adb(self):
-    path = self.config.get('adb_path', 'adb')
-    if path[0] != '/':
-      _, adb_path = run_shell('which ' + path)
-      if adb_path:
-        return path
-    if not os.path.exists(path):
-      sdk_root = os.environ.get('ANDROID_SDK_ROOT')
-      if sdk_root:
-        path = os.path.join(sdk_root, 'platform-tools/adb')
-    if os.path.exists(path):
-      return path
+    configured = self.config.get('adb_path', 'adb')
+    resolved = resolve_adb(configured)
+    if resolved:
+      return resolved
+    logger.error('adb executable not found; configure adb_path or add adb to PATH')
     return cached_class_property.nil_value
 
   @cached_class_property
@@ -171,7 +205,11 @@ class Configuration(object):
       if os.path.exists(res):
         return res
       logger.warning(f'resource_dir {res} is configured but does not exist')
-    res = os.path.abspath(os.path.dirname(os.path.relpath(__file__)) + '/../../resource') + '/'
+    env_resource_dir = os.environ.get("ALBATROSS_RESOURCE_DIR")
+    if env_resource_dir and os.path.exists(env_resource_dir):
+      return env_resource_dir
+    # res = os.path.abspath(os.path.dirname(os.path.relpath(__file__)) + '/../../resource') + '/'
+    res = str(Path(__file__).resolve().parents[2] / 'resource') + os.sep
     assert os.path.exists(res), res
     return res
 
@@ -239,8 +277,8 @@ class Configuration(object):
       arch_dir = jni_libs + arch + '/'
       if '64' in arch:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name,
-                      (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
-                        jni_libs + f'x86/{lib_name}', 'x86'))
+        (jni_libs + f'armeabi-v7a/{lib_name}', 'arm') if 'arm64' in arch else (
+          jni_libs + f'x86/{lib_name}', 'x86'))
       else:
         maps[arch] = (arch_dir + 'albatross_server', arch_dir + lib_name, None)
     return maps
