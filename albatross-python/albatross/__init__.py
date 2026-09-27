@@ -20,7 +20,7 @@ import traceback
 from typing import Optional
 from . import device
 
-__version__ = "3.6.0"
+__version__ = "3.6.1"
 
 _destroy_lock = threading.RLock()
 _destroying = False

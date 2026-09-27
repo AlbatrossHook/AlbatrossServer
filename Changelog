@@ -1,3 +1,7 @@
+version 3.6.1
+- Fix injection to pass the device temp path instead of None.
+- Add shared test helpers (check_client / hide_albatross) and bootstrap the python path in the test scripts so both albatross and the test package import correctly.
+
 version 3.6.0
 - Add the InjectApi interface and InjectAgentBase with a Python inject_client, exposing a unified inject API to the inject agent.
 - Add adb connection management: adb server / endpoint probing, device listing, a connection coordinator with cooldown, failure quarantine and recovery probing, plus connection metrics and a health snapshot.

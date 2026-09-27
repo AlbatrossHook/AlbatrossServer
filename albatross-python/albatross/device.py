@@ -1272,7 +1272,7 @@ class AlbatrossDevice(object):
     if su_file:
       return su_file
     for i in ["/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/su", "/system/bin/.ext/su",
-              "/system/usr/we-need-root/su", "/data/local/xbin/su", "/data/local/bin/su", "/data/local/su"]:
+      "/system/usr/we-need-root/su", "/data/local/xbin/su", "/data/local/bin/su", "/data/local/su"]:
       ret_code, _ = self.shell('ls ' + i, return_code=True)
       if ret_code == 0:
         return i
@@ -1388,8 +1388,8 @@ class AlbatrossDevice(object):
       lib_name = 'lib' + generate_random_variable_name(min_length=2, max_length=5) + '.so'
       app_agent_name = 'framework-' + generate_random_variable_name(min_length=2, max_length=6) + '.jar'
       device_config = {'lib_name': lib_name, 'app_agent_name': app_agent_name,
-                       'server_port': 'localabstract:' + generate_random_variable_name(min_length=2,
-                         max_length=8), 'dex_maps': {}, 'data': {}, 'server_port_num': 6000 + random.randint(0, 2000)}
+        'server_port': 'localabstract:' + generate_random_variable_name(min_length=2,
+          max_length=8), 'dex_maps': {}, 'data': {}, 'server_port_num': 6000 + random.randint(0, 2000)}
       with open(device_config_path, 'w') as fp:
         json.dump(device_config, fp, ensure_ascii=False, indent=1)
     return device_config
@@ -2546,7 +2546,7 @@ class AlbatrossDevice(object):
       self.push_file(plugin_dex, plugin_dex_device, mode='444')
       for pid in pids:
         # pid_int = int(pid)
-        res = client.inject_albatross(pid, self.app_inject_flags, None)
+        res = client.inject_albatross(pid, self.app_inject_flags, self.temp_path)
         if res >= 0:
           if plugin_lib:
             assert os.path.exists(plugin_lib), plugin_lib

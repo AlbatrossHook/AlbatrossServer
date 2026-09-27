@@ -1,3 +1,7 @@
+version 3.6.1
+- 修复注入时未传入设备临时路径（temp_path）的问题。
+- 测试新增共享 helper（check_client / hide_albatross），并为测试脚本添加 python path 引导，确保 albatross 与 test 包能正确 import。
+
 version 3.6.0
 - 新增 InjectApi 接口与 InjectAgentBase，并配套 Python 端 inject_client，向上层暴露统一的注入 API。
 - 新增 adb 连接管理：adb server / 端点探测、设备列表、带冷却与失败隔离及恢复探测的连接协调器，以及连接指标与健康快照。
