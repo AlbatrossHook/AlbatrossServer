@@ -100,7 +100,7 @@ class SystemServerClient(BaseClient):
     """
 
   @rpc_api
-  def set_top_app(self, pkg: str) -> str:
+  def set_top_app(self, pkg: str) -> bool:
     """
     设置顶层应用
 

@@ -60,6 +60,10 @@ public interface AlbatrossServerApi {
 
   boolean patchSelinux();
 
+  boolean supportExtendKpm();
+
+  boolean setInjectFlags(int flags, String tempPath);
+
   boolean isInjected();
 
   int getTid();

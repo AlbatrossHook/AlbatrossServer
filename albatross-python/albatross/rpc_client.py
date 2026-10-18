@@ -81,6 +81,13 @@ class AlbRpcMethod(object):
       if isinstance(content, JustReturn):
         return content.result
       content = str(content).encode(STRING_ENCODING)
+    # 异步方法: 走 MSG_ASYNC_CALL，payload 前置 handler 名。服务端把 handler 挪到
+    # 工作线程执行，结果仍以本 call idx 回（接收按 idx 匹配，等待语义与同步一致）；
+    # handler 卡死时由服务端超时代答 RPC_JOB_TIMEOUT。老服务端不认识该 cmd 会回
+    # NO_HANDLE —— except 分支里降级为普通同步调用重发。
+    is_async_call = method_name in getattr(client, '_async_methods', frozenset())
+    if is_async_call:
+      content = put_string(method_name) + (content or b'')
     request_lock = client.request_lock
     # if request_lock:
     send_exception = None
@@ -90,7 +97,7 @@ class AlbRpcMethod(object):
     client.last_request_time = (start, method_name)
     parser = self.parser
     try:
-      rpc_send_data(sock, content, method_id, self.rpc_id)
+      rpc_send_data(sock, content, method_id, MSG_ASYNC_CALL if is_async_call else self.rpc_id)
       if parser != void:
         if isinstance(parser, RawDataParser):
           parser.after_send(sock, args)
@@ -102,8 +109,35 @@ class AlbRpcMethod(object):
     if get_lock:
       request_lock.release()
     if send_exception:
-      raise send_exception
+      # 老服务端没有 MSG_ASYNC_CALL（dynamic/固定表都查不到）回 NO_HANDLE——
+      # 降级同步重发一次；其余异常照抛
+      if is_async_call and isinstance(send_exception, RpcCallException) \
+          and 'not find register handle' in str(send_exception):
+        if not quiet:
+          client.rpc_log(f'async not supported by server, fallback sync: {method_name}')
+        is_async_call = False
+        try:
+          get_lock = request_lock.acquire(True, timeout=client.request_lock_wait_time)
+          start = time.time()
+          try:
+            rpc_send_data(sock, self.handler(*args, **kwargs) or b'', method_id, self.rpc_id)
+            if parser != void:
+              if isinstance(parser, RawDataParser):
+                parser.after_send(sock, args)
+              idx, result, data = rpc_receive_data(sock)
+              while idx < method_id:
+                idx, result, data = rpc_receive_data(sock)
+          except BaseException as e2:
+            send_exception = e2
+        finally:
+          request_lock.release()
+        if send_exception:
+          raise send_exception
+      else:
+        raise send_exception
     end = time.time()
+    if client.recording_arms and method_name in getattr(client, '_arm_methods', frozenset()):
+      client.record_arm(method_name, args, kwargs)
     if parser == void:
       if not quiet:
         client.rpc_log(f"response {method_id_name}[{end - start:.2f}]:no return {rpc_name}")
@@ -146,6 +180,8 @@ class RpcMeta(type):
     call_tables = {}
     broadcast_tables = {}
     register_apis = {}
+    arm_methods = set()
+    async_methods = set()
     api_lists = [attrs]
     apis = attrs.get('apis')
     extend_apis = []
@@ -153,7 +189,15 @@ class RpcMeta(type):
       if issubclass(base, RpcApi):
         if apis and base not in apis:
           continue
+        # 基类的 _api 方法在基类 meta 构建时已被替换成 call_*，_arm 标记拿不到了，
+        # 直接并基类已收集好的集合
+        arm_methods |= getattr(base, '_arm_methods', frozenset())
         base.mark_subclass(attrs, api_lists)
+      elif issubclass(base, RpcClient):
+        # 客户端继承链走 RpcClient（metaclass=RpcMeta），基类方法靠 __getattr__
+        # 动态解析，这里只并 arm/async 方法集合
+        arm_methods |= getattr(base, '_arm_methods', frozenset())
+        async_methods |= getattr(base, '_async_methods', frozenset())
     for api_list in api_lists:
       for key, attr_value in api_list.items():
         if callable(attr_value):
@@ -161,6 +205,10 @@ class RpcMeta(type):
           if is_api:
             if key in call_tables:
               continue
+            if getattr(attr_value, '_arm', False):
+              arm_methods.add(key)
+            if getattr(attr_value, '_async_call', False):
+              async_methods.add(key)
             if api_list is not attrs:
               extend_apis.append(key)
             annotations = attr_value.__annotations__
@@ -210,6 +258,11 @@ class RpcMeta(type):
                   if raw_parser is not None:
                     ret_f = raw_parser(ret_f)
                 break
+              if arg_type is socket.socket:
+                # 传输层注入参数（打包表 nop，wire 不占字节）：打包保留、签名跳过，
+                # 与服务端 sign_of 的跳过对齐，否则比对/校验两侧都错位
+                args.append(arg_convert_tables[arg_type])
+                continue
               if issubclass(arg_type, Enum):
                 arg_type = get_enum_real_type(arg_type)
               args_desc.append(type_symbol_maps.get(arg_type, '0'))
@@ -271,6 +324,8 @@ class RpcMeta(type):
       for api_name in extend_apis:
         attrs[api_name] = api_getter(api_name)
     attrs['register_apis'] = register_apis
+    attrs['_arm_methods'] = frozenset(arm_methods)
+    attrs['_async_methods'] = frozenset(async_methods)
     ncls = super().__new__(mcs, cls_name, bases, attrs)
     return ncls
 
@@ -479,6 +534,18 @@ class RpcClient(metaclass=RpcMeta):
   register_apis: dict
   broadcast_tables = None
   broadcast_id_maps = None
+  # 服务端广播参数类型描述（名字 → 逐字符 ArgType 符号串，不含返回类型），连接时经 MSG_APIS v2 下发
+  broadcast_types = None
+  broadcast_ret_signs = None
+  # 服务端 RPC 方法签名（名字 → "ret+args"，如 "Zs" = boolean f(String)），v2 下发
+  allow_signs = None
+  # 武装脚本（进程重启重连后可重放的状态变更序列）。默认 None=未绑定（不记录）；
+  # 绑定为 list 后（见 start_arm_recording / Device.replay_arm_scripts），
+  # recording_arms 期间成功的武装型 RPC（@rpc_api(arm=True)）会按序追加进列表，
+  # reconnect() 成功后自动重放（auto_replay_arm 可关）。
+  arm_script: list | None = None
+  recording_arms = False
+  auto_replay_arm = True
   default_timeout = 100
   last_request_time = (0, '')
   call_counter = 0
@@ -511,6 +578,54 @@ class RpcClient(metaclass=RpcMeta):
   log = print
   rpc_log = log
 
+  # ---- 武装记录与重放（@rpc_api(arm=True) 的方法参与） ----
+
+  def start_arm_recording(self):
+    """开启武装记录：之后成功的武装型 RPC 按序追加进 self.arm_script。
+
+    arm_script 未绑定时自动建独立列表；要与 Device 共享（launch 重启自动重放）
+    先 bind_arm_script(server.arm_scripts.setdefault(uid, [])) 再开启。
+    """
+    if self.arm_script is None:
+      self.arm_script = []
+    self.recording_arms = True
+    return self.arm_script
+
+  def stop_arm_recording(self):
+    self.recording_arms = False
+
+  def record_arm(self, method, args, kwargs):
+    """按调用序记一条武装调用。注意是**引用语义**：记的是 args/kwargs 的引用，
+    可变参数（list/dict）事后被改，重放的是改后的值——要定格就传不可变值或
+    先拷贝。"""
+    if not self.recording_arms or self.arm_script is None:
+      return
+    self.arm_script.append((method, args, dict(kwargs)))
+
+  def replay_arm(self, script=None):
+    """在当前连接上按序重放武装脚本。单条失败记日志继续（如类还没加载出来），
+    返回 [(method, result, exception)]。脚本本身不清空，可重复重放。
+    重放期间抑制记录：重连自动重放时 recording_arms 往往还开着（没人规定要先
+    stop），重放出的调用再记回同一份脚本会每轮重启翻倍（N→2N→4N）。"""
+    entries = self.arm_script if script is None else script
+    results = []
+    was_recording = self.recording_arms
+    self.recording_arms = False
+    try:
+      for method, args, kwargs in list(entries or []):
+        try:
+          results.append((method, getattr(self, method)(*args, **kwargs), None))
+        except Exception as e:
+          self.log(f'{self.name} replay_arm {method}{args} fail: {e}')
+          results.append((method, None, e))
+    finally:
+      self.recording_arms = was_recording
+    return results
+
+  def bind_arm_script(self, script: list):
+    """绑定共享武装脚本列表（与其它 client / Device 共享同一份）。"""
+    self.arm_script = script
+
   def add_close_listener(self, listener, key='default'):
     self.on_close_callbacks[key] = listener
 
@@ -536,20 +651,118 @@ class RpcClient(metaclass=RpcMeta):
       return False
 
   def __getattr__(self, method):
-    allow_apis = self.allow_apis
+    # allow_apis/broadcast_tables 未连接时是类级 None，按空表处理，避免 TypeError 吞掉真实错误
+    allow_apis = self.allow_apis or {}
     if method in allow_apis:
-      handle_method = getattr(self, 'call_' + method)
+      handle_method = getattr(self, 'call_' + method, None)
+      if handle_method is None:
+        raise AttributeError(f'{type(self).__name__} has no declared api: {method}')
       parse_method = getattr(self, 'parse_' + method, None)
-      rpc_method = AlbRpcMethod(self, method, self.allow_apis[method], handle_method, parse_method)
+      rpc_method = AlbRpcMethod(self, method, allow_apis[method], handle_method, parse_method)
       setattr(self, method, rpc_method)
       return rpc_method
-    if method in self.broadcast_tables:
-      parse_method = getattr(self, 'receive_' + method, None)
-      setattr(self, method, parse_method)
-      return parse_method
+    if method in (self.broadcast_tables or {}):
+      return self._ensure_broadcast_parser(method)
     if not self.sock:
       raise RpcCloseException("connection is closed")
-    return super().__getattr__(method)
+    raise AttributeError(f'{type(self).__name__} has no rpc api or broadcast: {method}')
+
+  def _make_receive(self, name, types_desc=None):
+    """为服务端已注册、客户端类未声明的广播合成 payload 解析器（自动发现）。
+
+    有类型描述（MSG_APIS v2 下发的 ArgType 符号串）按类型解析；空串 = 无参广播；
+    无类型信息或含未知符号时退化为尽力按字符串收，保证订阅循环不再因漏声明而
+    抛 AttributeError。
+    """
+    if types_desc:
+      readers = []
+      for ch in types_desc:
+        reader = broadcast_arg_readers.get(ch)
+        if reader is None:
+          readers = None
+          break
+        readers.append(reader)
+    else:
+      # None = 服务端没给类型（老服务端）；'' = 已知无签名（native registerBroadcast
+      # 未登记 sign）。两者都可能实际带参，按"尽力按字符串收"处理而不是当零参——
+      # 零参解析器会把真实参数静默丢掉。真零参广播 payload 为空，走 [] 分支不受影响。
+      readers = None
+    if readers is None:
+      readers = [read_string]
+
+    def __wrapper(client, sock_data, sock):
+      if not sock_data:
+        return []
+      args = []
+      idx = 0
+      for parser in readers:
+        if parser == socket.socket:
+          args.append(sock)
+          continue
+        arg, idx = parser(sock_data, idx)
+        args.append(arg)
+      return args
+
+    return __wrapper
+
+  def _ensure_broadcast_parser(self, name):
+    key = 'receive_' + name
+    # 显式查实例/类字典，不走 getattr——get_apis 在 self.sock 赋值前就会调到这里，
+    # 走 __getattr__ 会误抛 RpcCloseException
+    parser = self.__dict__.get(key)
+    if parser is None:
+      # 类属性拿到的是未绑定函数（create_receive_function 的首参是 client），必须
+      # 绑到实例上，订阅循环才能按 parser(data, sock) 调用；实例字典里的（本方法
+      # 合成的闭包、外部塞的函数）保持原样——闭包再绑会错位注入 self
+      parser = getattr(type(self), key, None)
+      if parser is not None:
+        parser = parser.__get__(self, type(self))
+    if parser is not None:
+      return parser
+    # create_receive_function 的首参是 client（类里静态生成的 receive_* 靠方法绑定传入），
+    # 这里合成的要自己绑住实例，与订阅循环的 parser(data, sock) 调用约定对齐
+    raw_parser = self._make_receive(name, (self.broadcast_types or {}).get(name))
+
+    def bound_parser(sock_data, sock, _self=self, _raw=raw_parser):
+      return _raw(_self, sock_data, sock)
+
+    setattr(self, key, bound_parser)
+    return bound_parser
+
+  def _ensure_broadcast_result(self, name):
+    """为自动发现的广播合成 result_<name> 回包打包器（v2 签名的返回类型字符
+    → broadcast_result_packagers）。已声明的（类上有 RpcMeta 生成的 result_）
+    与无返回类型的不动。"""
+    key = 'result_' + name
+    if self.__dict__.get(key) is not None:
+      return
+    if getattr(type(self), key, None) is not None:
+      return
+    ret_ch = (self.broadcast_ret_signs or {}).get(name)
+    packager = broadcast_result_packagers.get(ret_ch) if ret_ch else None
+    if packager is not None:
+      setattr(self, key, packager)
+
+  def _ensure_broadcast_handler(self, name):
+    key = 'handle_' + name
+    # 同 _ensure_broadcast_parser：实例字典原样用，类属性（声明的广播存根/
+    # 类级 handler）按方法绑定；订阅循环 handler(*args) 不传 self
+    handler = self.__dict__.get(key)
+    if handler is None:
+      handler = getattr(type(self), key, None)
+      if handler is not None:
+        handler = handler.__get__(self, type(self))
+    if handler is not None:
+      return handler
+
+    def auto_handler(*args):
+      self.log(f'{self.name} broadcast {name} (auto-discovered, no handler): {args}')
+
+    # 标记为自动兜底：带回包的广播按 BROADCAST_RESULT_NO_HANDLER 回给服务端，
+    # 让带返回值的广播（broadcastWithResult）跳过本订阅者而不是乱解析回包
+    auto_handler._auto_broadcast = True
+    setattr(self, 'handle_' + name, auto_handler)
+    return auto_handler
 
   def connect(self):
     sock = self.sock
@@ -585,6 +798,9 @@ class RpcClient(metaclass=RpcMeta):
     try:
       if not self.sock:
         self.connect()
+        if self.arm_script and self.auto_replay_arm:
+          # 进程重启重连后自动重放武装脚本（单条失败已在 replay_arm 里记日志）
+          self.replay_arm()
         return True
     except:
       pass
@@ -626,7 +842,8 @@ class RpcClient(metaclass=RpcMeta):
   def get_apis(self, sock=None):
     if not sock:
       sock = self.sock
-    rpc_send_data(sock, None, self.call_counter, MSG_APIS)
+    # payload 'v' = 客户端按 v2 解析广播段（含参数类型）；老服务端忽略 payload 回老格式
+    rpc_send_data(sock, b'v', self.call_counter, MSG_APIS)
     self.call_counter += 1
     idx, result, data = rpc_receive_data(sock)
     num_api = struct.unpack('<i', data[:4])[0]
@@ -636,23 +853,90 @@ class RpcClient(metaclass=RpcMeta):
     else:
       num_broadcast = 0
       idx = 4
+    # v2 标志: 两计数后 1 字节 0x00（0 永不成为合法方法/广播 id——python 端自
+    # MSG_APIS+1 起编号、native 端固定/动态 cmd 均从 MSG_LAST 起且避开 0，老服务端
+    # 此位置必是首个方法的非零 cmd）。不能以广播数为前提：无广播的服务端 v2 也会写标志。
+    has_types = False
+    if not old_version and data[idx:idx + 1] == b'\0':
+      has_types = True
+      idx += 1
     broadcast_tables = {}
     broadcast_id_maps = {}
+    broadcast_types = {}
+    broadcast_ret_signs = {}
+    allow_signs = {}
 
     rpc_tables = {}
     for _ in range(num_api):
       cmd = data[idx]
       rpc_name, idx = read_string(data, idx + 1)
+      if has_types:
+        sign, idx = read_string(data, idx)
+        allow_signs[rpc_name] = sign
       rpc_tables[rpc_name] = cmd
     for _ in range(num_broadcast):
       cmd = data[idx]
       rpc_name, idx = read_string(data, idx + 1)
+      if has_types:
+        types_desc, idx = read_string(data, idx)
+        # 服务端 sign 首字符是返回类型：参数段喂解析器，返回段喂回包打包器
+        broadcast_types[rpc_name] = types_desc[1:] if types_desc else ''
+        broadcast_ret_signs[rpc_name] = types_desc[0] if types_desc else ''
       broadcast_tables[rpc_name] = cmd
       broadcast_id_maps[cmd] = rpc_name
     self.allow_apis = rpc_tables
     self.broadcast_tables = broadcast_tables
     self.broadcast_id_maps = broadcast_id_maps
+    self.broadcast_types = broadcast_types
+    self.broadcast_ret_signs = broadcast_ret_signs
+    self.allow_signs = allow_signs
+    # 为未声明的广播提前合成解析器与回包打包器（漏声明不再炸订阅循环，
+    # 带返回值的广播也不会把 'send empty' 字面量当返回值回给服务端）
+    for name in broadcast_tables:
+      self._ensure_broadcast_parser(name)
+      self._ensure_broadcast_result(name)
+    self._check_signatures(allow_signs)
     return rpc_tables
+
+  @staticmethod
+  def _sign_compatible(a: str, b: str) -> bool:
+    """兼容比对（不要求精确）：'s' 与 'j' 的 wire 布局相同（u16 长度 + 数据 +
+    '\0'），dict/list/json 传成 string、string 传成 json 都能正确解析，视为
+    可互换；其余类型必须同字符，参数个数不同（长度不同）不兼容。"""
+    if a == b:
+      return True
+    if len(a) != len(b):
+      return False
+    for ca, cb in zip(a, b):
+      if ca == cb:
+        continue
+      if {ca, cb} <= {'s', 'j'}:
+        continue
+      return False
+    return True
+
+  def _check_signatures(self, server_signs):
+    """连接即比对：本类声明的方法签名 vs 服务端注册签名，不兼容立刻抛
+    （参数类型/个数错了当场发现，而不是等到调用拿到垃圾值）。比对是兼容
+    语义：dict/list/json 与 string 同 wire 布局可互换。只比对类里声明过的
+    方法（register_apis）；cmodule 等动态注册的方法、服务端未下发签名的
+    （老服务端）跳过。"""
+    declared = getattr(self, 'register_apis', None) or {}
+    mismatches = []
+    for name, info in declared.items():
+      server_sign = server_signs.get(name)
+      if not server_sign:
+        continue
+      expect = (info.ret or '') + (info.args or '')
+      if '0' in expect:
+        # 声明里含无法映射符号的类型（如 socket 注入参数），wire 上不占字节，
+        # 无法构造可比的签名，跳过而不是误报不匹配
+        continue
+      if not self._sign_compatible(expect, server_sign):
+        mismatches.append(f'{name}: declared {expect!r} != server {server_sign!r}')
+    if mismatches:
+      raise RpcCallException('rpc signature mismatch (python side declaration != server):\n'
+                             + '\n'.join(mismatches))
 
   @rpc_api
   def subscribe(self, params: str = None, flags: int = 0):
@@ -664,6 +948,10 @@ class RpcClient(metaclass=RpcMeta):
     """
 
   def register_broadcast_handler(self, broadcast_name, handler):
+    # 未声明过的广播先合成解析器与回包打包器，保证 payload 能解出来、
+    # 带返回值的广播能把 handler 返回值正确打包回去
+    self._ensure_broadcast_parser(broadcast_name)
+    self._ensure_broadcast_result(broadcast_name)
     setattr(self, 'handle_' + broadcast_name, handler)
 
   def register_broadcast_listener(self, msg_id, listener):
@@ -721,13 +1009,18 @@ class RpcClient(metaclass=RpcMeta):
           self.can_send = False
         try:
           if broadcast_name:
-            arg_parser = getattr(self, 'receive_' + broadcast_name)
+            arg_parser = self._ensure_broadcast_parser(broadcast_name)
             args = arg_parser(data, self.sock)
-            handler = getattr(self, 'handle_' + broadcast_name)
+            handler = self._ensure_broadcast_handler(broadcast_name)
             result = handler(*args)
-            convertor = getattr(self, 'result_' + broadcast_name, None)
-            if convertor:
-              cmd, idx, to_send = convertor(cmd, idx, result)
+            if getattr(handler, '_auto_broadcast', False):
+              # 自动发现但没挂真 handler：按"无 handler"回给服务端，带返回值的
+              # 广播会跳过本订阅者（兜底 handler 返回 None，不能进打包器）
+              cmd = BROADCAST_RESULT_NO_HANDLER
+            else:
+              convertor = getattr(self, 'result_' + broadcast_name, None)
+              if convertor:
+                cmd, idx, to_send = convertor(cmd, idx, result)
           else:
             self.log(f'{self.name} get broadcast {cmd} no handler register! receive：{idx}, {data}')
             cmd = BROADCAST_RESULT_NO_HANDLER

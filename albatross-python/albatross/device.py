@@ -17,6 +17,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,11 +29,12 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, AlbatrossInitFlags, RunTimeISA, SetResult, \
-  MountResult
+from .albatross_client import AlbatrossClient, DexLoadResult, InjectFlag, InjectResult, AlbatrossInitFlags, RunTimeISA, \
+  SetResult, MountResult
 from .common import Configuration, run_shell, lib_origin_name, generate_random_variable_name, SYSTEM_UID, \
   OUT_TIME_CODE, FAULT_CODE, logger
-from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled, DeviceReboot
+from .exceptions import DeviceOffline, NoDeviceFound, DeviceNoFindErr, DeviceNotRoot, PackageNotInstalled, DeviceReboot, \
+  AttachFailed
 from .plugin import Plugin
 from .rpc_client import byte
 from .system_server_client import SystemServerClient
@@ -937,11 +939,100 @@ def file_md5(file_path):
 
 pkg_pattern = re.compile(r"package:([\w.]+)(?:\s+|$)")
 
+md5_pattern = re.compile(r"[0-9a-f]{32}")
+
 resume_activity_pattern = re.compile(r"mResumedActivity: ActivityRecord{\w+\s\w+\s([\w\.]+/[\w\.$]+)")
+
+# attach 系列失败时的诊断信息。背景:早先全失败与"app 没在运行"一样只返回 [](空列表),
+# "进程不在 / 注入被拒 / dex 推不上去 / 插件加载失败"四种情况无法区分,只能手工分步调用定位。
+# 详见 doc/framework_feedback/req-attach-silent-empty-20261003.md。
+_inject_result_hints = {
+  InjectResult.INJECT_PROCESS_SLEEPING: '目标进程处于 sleeping/frozen 状态,先 stop_app + start_app 再注入',
+  InjectResult.PROCESS_DEAD: '进程已退出,重新取 pid(get_java_processes_by_uid)并确认目标还活着',
+  InjectResult.ARCH_NO_SUPPORT: '进程架构不受支持,检查设备 ABI/32-64 位与部署库是否配套',
+  InjectResult.NO_LIB: '注入库缺失,resource 目录可能没刷新(先跑 script/update_resource.py)',
+  InjectResult.FAIL: '注入失败,多为目标进程起得不干净——stop_app + start_app 后重试',
+  InjectResult.CREATE_FAIL: '注入创建失败(空间/权限?),看设备端日志后用 stop_app + start_app 重试',
+}
+
+_plugin_result_hints = {
+  DexLoadResult.DEX_SEND_ERR: '插件 dex 没送到设备,确认推送结果与设备侧路径',
+  DexLoadResult.DEX_NOT_EXIT: '设备侧插件 dex 不存在,先 register_plugin / push_file(也可能是 agent dex 没推上去)',
+  DexLoadResult.DEX_NO_JVM: '目标进程不是 Java 进程(或 JVM 未就绪)',
+  DexLoadResult.DEX_VM_ERR: '目标进程 VM 异常,检查 ABI 与进程状态',
+  DexLoadResult.DEX_LOAD_FAIL: 'dex 加载失败(损坏/不配套),确认推的是最新构建',
+  DexLoadResult.DEX_CLASS_NO_FIND: 'dex 里没有这个插件类,检查 plugin_class 全名',
+  DexLoadResult.DEX_INIT_FAIL: '插件初始化失败,看插件日志与设备端 albatross 日志',
+  DexLoadResult.METHOD_NO_FIND: '插件入口方法没找到,检查 register_func 与生命周期方法名',
+  DexLoadResult.DEX_SYSTEM_SERVER_ERR: 'system_server 侧报错,看 system_server 日志',
+  DexLoadResult.DEX_PROCESS_SLEEPING: '插件加载时进程处于 sleeping 状态,stop_app + start_app 后重试',
+}
+
+_result_hints = {
+  'inject_albatross': _inject_result_hints,
+  'load_plugin': _plugin_result_hints,
+  'load_plugin_by_id': _plugin_result_hints,
+}
+
+
+def result_name(result):
+  """返回码 → '名字(值)';裸 int/未知值也能渲染。"""
+  if result is None:
+    return None
+  name = getattr(result, 'name', None)
+  try:
+    value = int(result)
+  except (TypeError, ValueError):
+    return str(result)
+  return f'{name}({value})' if name else str(value)
+
+
+def attach_failure(stage, result=None, pid=None, detail=None, hint=None):
+  """一条失败记录;日志汇总与实际抛出的 AttachFailed.failures 用同一份结构。"""
+  return {'pid': pid, 'stage': stage, 'result': result_name(result), 'detail': detail,
+    'hint': hint or _result_hints.get(stage, {}).get(result)}
+
+
+def no_process_failure(target, uid):
+  if not uid:
+    return attach_failure('process', detail=f'{target}: 包未安装或 uid 解析失败',
+      hint='确认包名正确、设备上确实装了该 app(get_package_uid)')
+  return attach_failure('process', detail=f'{target}: uid={uid} 没有运行中的 java 进程',
+    hint='先 stop_app + start_app 把 app 拉起来再 attach')
+
+
+def format_attach_failures(failures):
+  lines = []
+  for item in failures:
+    line = f"pid={item['pid']} {item['stage']}"
+    if item.get('result'):
+      line += f" -> {item['result']}"
+    if item.get('detail'):
+      line += f" ({item['detail']})"
+    if item.get('hint'):
+      line += f"; {item['hint']}"
+    lines.append(line)
+  return lines
+
+
+def report_attach_failures(action, target, failures, succeeded=0, raise_on_fail=False):
+  """失败汇总进日志(全失败 error / 部分失败 warning);全失败且要求时抛 AttachFailed。"""
+  if not failures:
+    return
+  if succeeded:
+    log = logger.warning
+    log(f'{action} {target}: 部分失败(成功 {succeeded} 项),以下失败:')
+  else:
+    log = logger.error
+    log(f'{action} {target}: 全部失败:')
+  for line in format_attach_failures(failures):
+    log('  - %s', line)
+  if not succeeded and raise_on_fail:
+    raise AttachFailed(action, target, failures)
 
 
 class AlbatrossDevice(object):
-  anti_detection = False
+  anti_detection = True
   auto_subscribe_system_server = True
 
   ret_code: int
@@ -1415,16 +1506,101 @@ class AlbatrossDevice(object):
       ret = self.root_shell('md5sum ' + filepath)
       if not ret or 'No such' in ret:
         return None
-    return ret.split()[0].strip()
+    md5 = ret.split()[0].strip()
+    if not md5_pattern.fullmatch(md5):
+      # md5sum 缺失/异常输出不能当 md5 用,否则校验恒不一致,会把完好文件误判成损坏
+      return None
+    return md5
+
+  def device_file_md5_matches(self, dst, expect_md5):
+    """设备侧文件 md5 与期望值比对:True/False;None = 设备侧取不到 md5,无法判定。"""
+    device_md5 = self.get_file_md5(dst)
+    if device_md5 is None:
+      return False
+    return device_md5 == expect_md5
+
+  def pulled_file_matches(self, src_android, dst_pc):
+    """拉取完整性校验:设备侧与本地落盘的 md5 比对。
+    True=一致,False=不一致,None=无法判定(目录拉取/任一侧取不到 md5)。"""
+    src = str(src_android)
+    if src.endswith('/'):
+      return None
+    try:
+      ret_code, _ = self.shell(f'test -d "{src}"', return_code=True)
+      if ret_code == 0:
+        return None
+      local = dst_pc
+      if os.path.isdir(dst_pc):
+        local = os.path.join(dst_pc, os.path.basename(src))
+      local_md5 = file_md5(local)
+      device_md5 = self.get_file_md5(src)
+    except Exception:
+      # 校验通道本身不可用(设备离线等)不判失败,退回旧行为
+      return None
+    if local_md5 is None or device_md5 is None:
+      return None
+    return local_md5 == device_md5
 
   def delete_file(self, file_path):
     self.root_shell('rm -rf {}'.format(file_path))
     return self.ret_code == 0
 
-  def push_file(self, file, dst, check=False, mode=None, file_type=None, owner=None, timeout=120):
+  # 客户端会把 resource 目录里的 so/dex 推到设备上(lib、agent dex、插件)。若本地这份
+  # 比设备上已有的还旧(典型:resource 目录没跟上最新构建),推上去就是把设备上较新的
+  # 部署换回旧的——库与 agent dex 不配套时注入即崩,而旧行为是完全静默的。
+  # 推送前做一次降级检查,策略由 ALBATROSS_LIB_DOWNGRADE 控制:
+  #   warn(默认) 告警 + 备份设备侧副本后继续推送
+  #   refuse     拒绝推送(返回 False,调用方视为"未更新")
+  #   allow      不检查,保持旧行为
+  # 判据是设备侧文件 mtime 比本地新(adb push 保留 mtime,同一宿主机推的文件可跨端比较)。
+  downgrade_exts = ('.so', '.dex', '.jar')
+
+  def device_file_mtime(self, path):
+    """设备侧文件 mtime(epoch 秒);文件不存在或取不到返回 None。"""
+    out = self.root_shell(f'stat -c %Y "{path}" 2>/dev/null')
+    if not out:
+      return None
+    match = re.search(r'\d{9,}', out)
+    return int(match.group(0)) if match else None
+
+  def check_deploy_downgrade(self, file, dst):
+    """推送前检查是否会把设备上更新的同名文件换成旧的;True = 继续推送。"""
+    strategy = os.environ.get('ALBATROSS_LIB_DOWNGRADE', 'warn').strip().lower()
+    if strategy == 'allow' or not dst or dst.endswith('/'):
+      return True
+    if not str(file).endswith(self.downgrade_exts):
+      return True
+    try:
+      local_mtime = int(os.path.getmtime(file))
+    except OSError:
+      return True
+    device_mtime = self.device_file_mtime(dst)
+    if device_mtime is None or device_mtime <= local_mtime:
+      return True
+    if file_md5(file) == self.get_file_md5(dst):
+      # 内容与设备上一致:推送本来就是空操作,不必告警
+      return True
+    fmt = '%Y-%m-%d %H:%M'
+    detail = (f'本地 {file} ({time.strftime(fmt, time.localtime(local_mtime))}) 比设备上 {dst} '
+              f'({time.strftime(fmt, time.localtime(device_mtime))}) 旧')
+    hint = 'resource 目录可能没跟上最新构建,先跑 script/update_resource.py 刷新;确实要推旧版可设 ALBATROSS_LIB_DOWNGRADE=allow'
+    if strategy == 'refuse':
+      logger.error(f'拒绝推送(会把设备上较新的部署换成旧的): {detail}; {hint}')
+      return False
+    backup = dst + '.bak'
+    self.root_shell(f'cp -f -p "{dst}" "{backup}"')
+    logger.warning(f'推送会覆盖设备上更新的文件(已备份到 {backup}): {detail}; {hint}')
+    return True
+
+  def push_file(self, file, dst, check=False, mode=None, file_type=None, owner=None, timeout=120,
+      downgrade_guard=True):
     if not os.path.exists(file):
       return False
+    if downgrade_guard and not self.check_deploy_downgrade(file, dst):
+      return False
     md5_dst = file_md5(file)
+    if dst[-1] == "/":
+      dst += os.path.basename(file)
     extra_cmds = []
     if mode:
       extra_cmds.append(f'chmod {mode} {dst}')
@@ -1436,8 +1612,6 @@ class AlbatrossDevice(object):
       return False
     md5_current = False
     if check or os.stat(file).st_size > 8192:
-      if dst[-1] == "/":
-        dst += os.path.basename(file)
       md5_current = self.get_file_md5(dst)
       if md5_dst == md5_current:
         if extra_cmds:
@@ -1447,24 +1621,28 @@ class AlbatrossDevice(object):
       self.delete_file(dst)
     # command = self.cmd + ' push "{}" "{}"'.format(file, dst)
     ret_code, s = self.adb_cmd('push', file, dst, timeout=timeout)
-    res = ret_code == 0
-    if res:
-      if extra_cmds:
-        self.root_shell(';'.join(extra_cmds))
-      logger.info(s)
-      return res
-    elif b'pushed' in s:
-      new_md5 = self.get_file_md5(dst)
-      if new_md5 == md5_dst:
+    if ret_code == 0 or (b'pushed' in s and b'error:' not in s):
+      # 命令成功不代表内容完整(截断/丢尾),推送后按 md5 校验落点;
+      # 设备侧读不到 md5(受限目录/权限)时无法判定,退回旧行为按成功处理。
+      matched = self.device_file_md5_matches(dst, md5_dst)
+      if matched is not False:
+        if extra_cmds:
+          self.root_shell(';'.join(extra_cmds))
+        logger.info(s)
         return True
+      logger.warning(f'push {file} -> {dst} 落点内容不完整(md5 不一致),走备用路径重试')
     if self.is_root and self.shell_user == 'shell':
       tmp_path = '/data/local/tmp/' + md5_dst
       # command = self.cmd + ' push "{}" "{}"'.format(file, tmp_path)
       ret_code, s = self.adb_cmd('push', file, tmp_path, timeout=120)
-      res = ret_code == 0
-      if res:
+      # tmp 落点在 /data/local/tmp 一定可读,md5 不一致直接判失败,不把残缺文件 mv 到位
+      if ret_code == 0 and self.device_file_md5_matches(tmp_path, md5_dst) is not False:
         command = self.root_shell(f'mkdir -p {os.path.dirname(dst)} && mv {tmp_path} {dst}')
         if not command:
+          # mv 跨文件系统时退化为复制,落点再校验一次
+          if self.device_file_md5_matches(dst, md5_dst) is False:
+            logger.error(f'push {file} -> {dst} 失败:mv 后落点内容不完整')
+            return False
           logger.info(s)
           if extra_cmds:
             self.root_shell(';'.join(extra_cmds))
@@ -2047,6 +2225,8 @@ class AlbatrossDevice(object):
     try:
       if self.is_selinux_on():
         client.patch_selinux()
+        if self.sdk_version >= 37:
+          client.add_selinux_rule('system_server', 'system_server_startup', 'memfd_file', 'execute')
       sync_lib()
       if self.anti_detection:
         self.hide_mount(client)
@@ -2296,6 +2476,18 @@ class AlbatrossDevice(object):
         return -1
     return 1
 
+  def bind_arm_script(self, uid, client):
+    """把 uid 的共享武装脚本绑到 client（与根服务客户端 AlbatrossClient.arm_scripts
+    同一份列表）。绑定后 client 重连（reconnect）时会自动重放脚本；要立即恢复
+    现场用返回值里的列表调 client.replay_arm()。"""
+    return self.client.bind_arm_script(uid, client)
+
+  def replay_arm_scripts(self, uid, client):
+    """绑定并立即在 client 上重放 uid 的武装脚本（launch 重启后恢复 cmodule/
+    hook/trace 现场）。单条失败不中断，返回 [(method, result, exception)]。"""
+    script = self.bind_arm_script(uid, client)
+    return client.replay_arm(script) if script else []
+
   def launch(self, target_package, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
       plugin_flags: int = 0):
     if not self.is_app_install(target_package):
@@ -2344,6 +2536,15 @@ class AlbatrossDevice(object):
             time.sleep(20)
             self.back()
           system_server_restart_callback = self.system_server_restart_callback
+          try:
+            if not client.reconnect():
+              c = self.get_client()
+              c.close()
+              client.port = c.port
+              client.reconnect()
+          finally:
+            pass
+          # client = self.get_client()
       client.set_system_server_agent(agent_dst, Configuration.system_server_init_class, "system_server",
         AlbatrossInitFlags.NONE, None, self.system_server_init_flags)
       client.set_app_agent(self.agent_dex, None, Configuration.albatross_class_name,
@@ -2360,45 +2561,70 @@ class AlbatrossDevice(object):
       return cached_property.nil_value
 
   def launch_fast(self, target_package, plugin_dex, plugin_class, plugin_params: str = None,
-      plugin_flags: int = 0, plugin_lib=None):
+      plugin_flags: int = 0, plugin_lib=None, raise_on_fail=False):
     uid = self.get_package_uid(target_package)
     if not uid:
+      failures = [no_process_failure(target_package, uid)]
+      report_attach_failures('launch_fast', target_package, failures, 0, raise_on_fail)
       return False
     if not self.init_plugin_env:
+      failures = [attach_failure('init_plugin_env', detail=f'{target_package}: 插件环境初始化失败',
+        hint='看上面 init plugin env fail 的 error 日志(dex/agent 推送、device config、selinux 等)')]
+      report_attach_failures('launch_fast', target_package, failures, 0, raise_on_fail)
       return False
     client = self.client
     plugin = self.register_plugin(plugin_dex, plugin_class, plugin_params, plugin_flags, plugin_lib)
     res = client.add_plugin_rule(plugin.plugin_id, uid, target_package if uid == SYSTEM_UID else None)
     if res == SetResult.MISS_INFO:
       client.set_app_info(uid, target_package + ":" + str(self.get_package_version_code(target_package)))
+    elif res not in [SetResult.SET_OK, SetResult.SET_ALREADY]:
+      failures = [attach_failure('add_plugin_rule', res, detail=f'{target_package}: 插件规则没挂上',
+        hint='NOT_EXISTS=插件未登记(先 register_plugin);SYSTEM_SERVER_ERR=system_server 侧崩了/未就绪')]
+      report_attach_failures('launch_fast', target_package, failures, 0, raise_on_fail)
+      return False
     self.stop_app(target_package)
     self.start_app(target_package)
     return True
 
-  def launch_with_plugins(self, target_package, plugins):
+  def launch_with_plugins(self, target_package, plugins, raise_on_fail=False):
     uid = self.get_package_uid(target_package)
     if not uid:
+      failures = [no_process_failure(target_package, uid)]
+      report_attach_failures('launch_with_plugins', target_package, failures, 0, raise_on_fail)
       return False
     client = self.client
+    failures = []
     for plugin in plugins:
       res = client.add_plugin_rule(plugin.plugin_id, uid, target_package if uid == SYSTEM_UID else None)
       if res == SetResult.MISS_INFO:
         client.set_app_info(uid, target_package + ":" + str(self.get_package_version_code(target_package)))
       elif res not in [SetResult.SET_OK, SetResult.SET_ALREADY]:
-        return False
+        failures.append(attach_failure('add_plugin_rule', res, detail=f'{target_package}: {plugin.plugin_class}',
+          hint='NOT_EXISTS=插件未登记(先 register_plugin);SYSTEM_SERVER_ERR=system_server 侧崩了/未就绪'))
+    if failures:
+      report_attach_failures('launch_with_plugins', target_package, failures, len(plugins) - len(failures),
+        raise_on_fail)
+      return False
     self.start_app(target_package)
     return True
 
-  def attach_with_plugins(self, package_or_pid, plugins, init_flags=None, extra_info=None, inject_flags=None):
+  def attach_with_plugins(self, package_or_pid, plugins, init_flags=None, extra_info=None, inject_flags=None,
+      raise_on_fail=False):
     client = self.client
     uid = -1
+    failures = []
     if isinstance(package_or_pid, str):
       uid = self.get_package_uid(package_or_pid)
       pids = client.get_java_processes_by_uid(uid)
+      if not pids:
+        failures.append(no_process_failure(package_or_pid, uid))
     elif type(package_or_pid) == int:
       pids = [package_or_pid]
     else:
       pids = package_or_pid
+    if pids and not plugins:
+      failures.append(attach_failure('args', detail=f'{package_or_pid}: plugins 为空',
+        hint='先 register_plugin 拿到 Plugin 再传进来'))
     success = []
     if pids and plugins:
       agent_dex = self.agent_dex
@@ -2421,22 +2647,34 @@ class AlbatrossDevice(object):
             if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
               success.append((pid, plugin))
               success_count += 1
+            else:
+              failures.append(attach_failure('load_plugin', res, pid=pid, detail=plugin.plugin_class))
           if success_count:
             if uid < 0:
               uid = client.process_uid(pid)
             callbacks = client.launch_callback.get(uid)
             if callbacks:
               client.invoke_callbacks(callbacks, uid, pid, None)
+        else:
+          failures.append(attach_failure('inject_albatross', res, pid=pid))
 
+    report_attach_failures('attach_with_plugins', package_or_pid, failures, len(success), raise_on_fail)
     return success
 
-  def attach_with_plugin_ids(self, package_or_pid, plugins):
+  def attach_with_plugin_ids(self, package_or_pid, plugins, raise_on_fail=False):
     assert self.init_plugin_env
     client = self.client
+    failures = []
     if isinstance(package_or_pid, str):
-      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
+      uid = self.get_package_uid(package_or_pid)
+      pids = client.get_java_processes_by_uid(uid)
+      if not pids:
+        failures.append(no_process_failure(package_or_pid, uid))
     else:
       pids = [package_or_pid]
+    if pids and not plugins:
+      failures.append(attach_failure('args', detail=f'{package_or_pid}: plugins 为空',
+        hint='先 register_plugin 拿到 Plugin 再传进来'))
     success = []
     for pid in pids:
       res = client.inject_albatross(pid, self.app_inject_flags, None)
@@ -2445,6 +2683,12 @@ class AlbatrossDevice(object):
           res = client.load_plugin_by_id(pid, plugin.plugin_id)
           if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
             success.append((pid, plugin))
+          else:
+            failures.append(attach_failure('load_plugin_by_id', res, pid=pid,
+              detail=f'{plugin.plugin_class}(id={plugin.plugin_id})'))
+      else:
+        failures.append(attach_failure('inject_albatross', res, pid=pid))
+    report_attach_failures('attach_with_plugin_ids', package_or_pid, failures, len(success), raise_on_fail)
     return success
 
   def register_plugin(self, plugin_dex, plugin_class, plugin_params: str = None,
@@ -2533,10 +2777,14 @@ class AlbatrossDevice(object):
     return res
 
   def attach(self, package_or_pid, plugin_dex, plugin_class, plugin_lib=None, plugin_params: str = None,
-      plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE, extra_info=None):
+      plugin_flags: int = 0, init_flags=AlbatrossInitFlags.NONE, extra_info=None, raise_on_fail=False):
     client = self.client
+    failures = []
     if isinstance(package_or_pid, str):
-      pids = client.get_java_processes_by_uid(self.get_package_uid(package_or_pid))
+      uid = self.get_package_uid(package_or_pid)
+      pids = client.get_java_processes_by_uid(uid)
+      if not pids:
+        failures.append(no_process_failure(package_or_pid, uid))
     else:
       pids = [package_or_pid]
     success = []
@@ -2565,6 +2813,12 @@ class AlbatrossDevice(object):
             plugin_flags)
           if res in [DexLoadResult.DEX_LOAD_SUCCESS, DexLoadResult.DEX_ALREADY_LOAD]:
             success.append(pid)
+          else:
+            failures.append(attach_failure('load_plugin', res, pid=pid, detail=plugin_class))
+        else:
+          failures.append(attach_failure('inject_albatross', res, pid=pid))
+
+    report_attach_failures('attach', package_or_pid, failures, len(success), raise_on_fail)
     return success
 
   def forward_tcp(self, local_port, device_port=None, keep=False):
@@ -2775,7 +3029,9 @@ class AlbatrossDevice(object):
       if dir_path and not os.path.exists(dir_path):
         os.makedirs(dir_path, exist_ok=True)
       if not os.path.exists(output_path) or overwrite:
-        self.pull_file(paths[0], output_path)
+        if not self.pull_file(paths[0], output_path, check=True):
+          shutil.rmtree(output_path)
+          return None
       return output_path
     else:
       if not os.path.exists(output_path):
@@ -2785,7 +3041,9 @@ class AlbatrossDevice(object):
       if output_path[-1] != '/':
         output_path += "/"
       for path in paths:
-        self.pull_file(path, output_path)
+        if not self.pull_file(path, output_path):
+          shutil.rmtree(output_path)
+          return None
     return output_path[-1:]
 
   def start_app(self, target_package):
@@ -2889,7 +3147,7 @@ class AlbatrossDevice(object):
       return top_stack[0], top_stack[1]
     return None, None
 
-  def pull_file(self, src_android, dst_pc, is_del=False):
+  def pull_file(self, src_android, dst_pc, is_del=False, check=False):
     # command = self.cmd + ' pull "{}" "{}"'.format(src_android, dst_pc)
     ret_code, res = self.adb_cmd('pull', src_android, dst_pc)
     if ret_code != 0:
@@ -2908,9 +3166,14 @@ class AlbatrossDevice(object):
         # command = self.cmd + ' pull "{}" "{}"'.format(dst_mv, dst_pc)
         ret_code, res = self.adb_cmd('pull', dst_mv, dst_pc)
         self.root_shell('rm -rf {}'.format(dst_mv))
-        if is_del:
-          self.root_shell('rm -rf {}'.format(src_android))
-        return ret_code == 0
+        if ret_code != 0:
+          return False
+      else:
+        return False
+    # 命令成功不代表内容完整,拉取后按 md5 比对设备侧与本地落点;
+    # 目录拉取或任一侧取不到 md5 时无法判定,退回旧行为按成功处理。
+    if check and self.pulled_file_matches(src_android, dst_pc) is False:
+      logger.error(f'pull {src_android} -> {dst_pc} 内容不完整(md5 不一致),按失败处理')
       return False
     if not is_del:
       return True

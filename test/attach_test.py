@@ -35,7 +35,7 @@ def main(device_id=None, anti_detection=True):
     hide_albatross(device)
 
   user_pkgs = device.get_user_packages()
-  plugin_dex = Configuration.resource_dir + "plugins/plugin_demo.dex"
+  plugin_dex = Configuration.resource_dir + "plugins/plugin_demo.apk"
   plugin_class = "qing.albatross.plugin.app.DemoPlugin"
   client = device.client
 
@@ -88,4 +88,4 @@ def main(device_id=None, anti_detection=True):
 
 
 if __name__ == '__main__':
-  main(anti_detection=False)
+  main(anti_detection=True)

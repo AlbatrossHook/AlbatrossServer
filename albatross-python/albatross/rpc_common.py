@@ -68,19 +68,48 @@ class ServerReturnResult(ByteEnum):
   ERR_NO_SUPPORT = -123
   NO_HANDLE = -122
   HANDLE_EXCEPTION = -121
+  RPC_JOB_TIMEOUT = -118   # 异步 job 超过硬超时仍无结果，服务端代答
+  RPC_JOB_OVERLOAD = -117  # 异步工作线程被卡死 job 占住/队列满，拒绝投递
+  RPC_SIGN_MISMATCH = -116 # 请求参数与注册签名不符（data 为 handler 名）
+
+MSG_ASYNC_CALL = 23  # 与 server_common.h 的 MsgCommand 枚举序数一致
 
 
 err_desc = {
   ServerReturnResult.ERR_NO_SUPPORT: "operation not support for method {}",
   ServerReturnResult.NO_HANDLE: "not find register handle method {}",
-  ServerReturnResult.HANDLE_EXCEPTION: "occur exception when handle method {}"
+  ServerReturnResult.HANDLE_EXCEPTION: "occur exception when handle method {}",
+  ServerReturnResult.RPC_JOB_TIMEOUT: "async job timeout for method {}",
+  ServerReturnResult.RPC_JOB_OVERLOAD: "async job rejected (overloaded) for method {}",
+  ServerReturnResult.RPC_SIGN_MISMATCH: "arguments mismatch registered sign for method {}",
 }
 
 void = type(None)
 
 
-def rpc_api(fn):
+def rpc_api(fn=None, *, arm=False, is_async=False):
+  """声明一个 RPC 方法。
+
+  arm=True: "武装型"调用（cmodule/hook/trace 等改变目标进程状态的操作），
+  开启武装记录后成功调用会被记进 arm_script，进程重启重连后可经 replay_arm
+  自动重放。
+
+  is_async=True: 服务端把该 handler 挪出单线程循环到工作线程执行（服务端方法
+  需同时标 @AsyncRpc），卡死时只占工作线程并由服务端超时代答，循环与其它
+  客户端不受影响。老服务端回 NO_HANDLE 时自动降级同步调用。
+  """
+  if fn is None:
+    def decorator(f):
+      f._api = True
+      if arm:
+        f._arm = True
+      if is_async:
+        f._async_call = True
+      return f
+    return decorator
   fn._api = True
+  if is_async:
+    fn._async_call = True
   return fn
 
 
@@ -331,7 +360,19 @@ arg_read_tables = {int: read_int, str: read_string, str | None: read_string, byt
   float: read_float, double: read_double, short: read_short, long: read_long, u32: read_u32, dict: read_json,
   list: read_json, bytes: read_bytes, socket.socket: socket.socket}
 type_symbol_maps = {int: 'I', str: 's', byte: 'B', bool: 'Z', float: 'F', double: 'D', short: 'S', long: 'J', u32: 'I',
-  bytes: 'b'}
+  bytes: 'b', void: 'V', dict: 'j', list: 'j'}  # dict/list 对齐 Java端ARG_STR
+
+
+def read_char(data, idx):
+  v, idx = read_byte(data, idx)
+  return chr(v), idx
+
+
+# 广播参数类型符号 → 接收端解析器。符号即 native ArgType 枚举值本身（见 include/albatross.h，
+# ARG_INT='I'/ARG_JSON='j'/ARG_CHAR='C'...），服务端按注册时的参数类型逐字符下发。
+broadcast_arg_readers = {'I': read_int, 'Z': read_bool, 's': read_string, 'B': read_byte,
+  'J': read_long, 'j': read_json, 'S': read_short, 'F': read_float, 'D': read_double,
+  'C': read_char, 'b': read_bytes}
 
 
 def type_to_arg_desc(ts):
@@ -481,6 +522,15 @@ return_convert_mappings = {bool: staticmethod(convert_bool), int: staticmethod(c
                            dict: staticmethod(convert_json), list: staticmethod(convert_json),
                            void: None, short: staticmethod(convert_short), byte: staticmethod(convert_byte), None: None,
                            }
+
+# 广播返回类型符号（ArgType 字符）→ 回包打包器：自动发现的广播（客户端未声明
+# @broadcast_api）没有 RpcMeta 生成的 result_<name>，按 v2 下发签名的返回类型
+# 字符就地合成；void/未知类型不登记（无回包预期）。
+broadcast_result_packagers = {}
+for _t, _sym in type_symbol_maps.items():
+  _packager = return_convert_mappings.get(_t)
+  if _packager is not None and _sym not in broadcast_result_packagers:
+    broadcast_result_packagers[_sym] = _packager
 
 
 class api_getter(object):

@@ -68,6 +68,14 @@ import qing.albatross.nativehook.SearchCallback;
 import qing.albatross.reflection.ReflectUtils;
 import qing.albatross.server.JsonFormatter;
 import qing.albatross.server.UnixRpcServer;
+import qing.albatross.tracker.DefaultSinker;
+import qing.albatross.tracker.EmptySinker;
+import qing.albatross.tracker.EventType;
+import qing.albatross.tracker.KeyWordSinker;
+import qing.albatross.tracker.OceanLogger;
+import qing.albatross.tracker.OceanSinker;
+import qing.albatross.tracker.OceanTracker;
+import qing.albatross.tracker.StringSinker;
 
 public class AppInjectAgent extends InjectAgentBase implements AppApi {
 
@@ -82,6 +90,209 @@ public class AppInjectAgent extends InjectAgentBase implements AppApi {
   @Override
   public native void onLibLoad(String lib, String threadName);
 
+
+  static class MySinker extends DefaultSinker {
+
+  }
+
+
+  @Override
+  public boolean traceCall(boolean onlyMainThread) {
+    return tryTrace(new DefaultSinker(onlyMainThread), onlyMainThread, EventType.CALL);
+  }
+
+  @Override
+  public boolean traceReturn(boolean onlyMainThread, int externFlags) {
+    return tryTrace(new DefaultSinker(onlyMainThread), onlyMainThread, EventType.RETURN | externFlags);
+  }
+
+  @Override
+  public boolean stopTrace() {
+    if (!onlyMainThread)
+      return OceanTracker.stopTraceGlobal();
+    else {
+      if (sinker != null) {
+        Boolean[] res = new Boolean[]{null};
+        Albatross.getMainHandler().post(() -> {
+          boolean result = OceanTracker.stopTraceMe();
+          synchronized (res) {
+            res[0] = result;
+            res.notify();
+          }
+        });
+        synchronized (res) {
+          try {
+            if (res[0] == null)
+              res.wait(15000);
+          } catch (InterruptedException ignore) {
+          }
+        }
+        return res[0] != null ? res[0] : false;
+      }
+      return false;
+    }
+  }
+
+  OceanSinker sinker;
+  boolean onlyMainThread;
+
+  @Override
+  public boolean traceKeyword(String keyword, boolean mainThread) {
+    return tryTrace(new KeyWordSinker(keyword), mainThread, EventType.CALL);
+  }
+
+  @Override
+  public boolean changeTraceKeyword(String keyword) {
+    if (sinker == null) {
+      return false;
+    }
+    if (sinker instanceof KeyWordSinker keyWordSinker) {
+      keyWordSinker.changeKeyWord(keyword);
+    }
+    return false;
+  }
+
+  private boolean tryTrace(OceanSinker sinker, boolean mainThread, int event) {
+    if (!OceanTracker.init(0))
+      return false;
+    if (OceanTracker.isCurrentThreadTraced())
+      return false;
+    if (mainThread) {
+      /* 没有 ActivityThread 的进程(load_jvm 之后的原生宿主/无 Activity 环境):
+       * getMainHandler() 会 NPE, 也没有可投递的主线程 —— 主线程追踪不可用。 */
+      if (Albatross.mainHandlerOrNull() == null)
+        return false;
+      Boolean[] result = new Boolean[]{null};
+      Albatross.getMainHandler().post(() -> {
+        if (OceanTracker.traceMe(sinker, event)) {
+          synchronized (result) {
+            result[0] = true;
+            result.notify();
+          }
+          OceanTracker.syncTrace();
+          this.sinker = sinker;
+          onlyMainThread = true;
+        } else {
+          synchronized (result) {
+            result[0] = false;
+            result.notify();
+          }
+        }
+      });
+      synchronized (result) {
+        if (result[0] == null) {
+          try {
+            result.wait(5000);
+          } catch (InterruptedException ignore) {
+          }
+        }
+      }
+      return result[0] != null ? result[0] : false;
+    } else {
+      boolean result = OceanTracker.traceGlobal(sinker, event);
+      if (result) {
+        OceanTracker.syncTrace();
+        this.sinker = sinker;
+        onlyMainThread = false;
+      }
+      return result;
+    }
+  }
+
+  @Override
+  public boolean traceString(String keyword, boolean mainThread) {
+    return tryTrace(new StringSinker(keyword), mainThread, EventType.CALL);
+  }
+
+  @Override
+  public boolean traceTest(boolean mainThread) {
+    return tryTrace(new EmptySinker(), mainThread, EventType.CALL);
+  }
+
+  @Override
+  public int traceCount() {
+    if (sinker == null)
+      return 0;
+    return sinker.callCount;
+  }
+
+  @Override
+  public void setTraceScope(int traceScope) {
+    if (OceanTracker.init(0))
+      OceanTracker.setTraceScope(traceScope);
+  }
+
+  @Override
+  public void setTraceTimeout(int timeoutMs) {
+    // 追踪窗口配置是进程级的, 任意线程可调; 追踪进行中调用从现在起重新计时
+    OceanTracker.setTraceTimeout(timeoutMs);
+  }
+
+  @Override
+  public void setTraceMaxEvents(int maxEvents) {
+    OceanTracker.setTraceMaxEvents(maxEvents);
+  }
+
+  @Override
+  public String traceStatus() {
+    boolean running = OceanTracker.isTraceRunning();
+    int reason = OceanTracker.getStopReason();
+    /*
+     * 窗口已过但目标线程空闲、事件回调还没触发时在这里补停:
+     * 主线程追踪要在主线程上停(与 stopTrace 同一路径), 全局追踪任意线程可停。
+     */
+    if (running && OceanTracker.windowStopReason(-1) != OceanTracker.REASON_NONE) {
+      reason = OceanTracker.windowStopReason(-1);
+      OceanTracker.noteStopReason(reason);
+      /*
+       * 只投递停止请求不等待: 主线程可能正忙于被追踪的代码, 别把 RPC 线程卡住。
+       * 没有 ActivityThread(原生宿主)时没有可投递的主线程, 只能就地停(同
+       * OceanTracker.requestStop 的降级路径)。
+       */
+      if (!onlyMainThread)
+        OceanTracker.stopTraceGlobal();
+      else if (Albatross.mainHandlerOrNull() != null)
+        Albatross.getMainHandler().post(OceanTracker::stopTraceMe);
+      else
+        OceanTracker.stopTraceMe();
+      running = OceanTracker.isTraceRunning();
+    }
+    /* events 用窗口计数(所有事件类型); sinker.callCount 只计 CALL/RETURN,
+     * 配了 exec/block/字段事件时会少报。sinker 计数另有 traceCount() RPC。 */
+    int events = OceanTracker.getWindowEventCount();
+    StringBuilder sb = new StringBuilder(160);
+    sb.append("{\"running\":").append(running)
+        .append(",\"mode\":\"").append(onlyMainThread ? "main" : "global").append('"')
+        .append(",\"stop_reason\":").append(reason)
+        .append(",\"stop_reason_name\":\"").append(OceanTracker.stopReasonName(reason)).append('"')
+        .append(",\"timeout_ms\":").append(OceanTracker.getTraceTimeout())
+        .append(",\"max_events\":").append(OceanTracker.getTraceMaxEvents())
+        .append(",\"elapsed_ms\":").append(OceanTracker.getWindowElapsedMs())
+        .append(",\"events\":").append(events)
+        .append('}');
+    return sb.toString();
+  }
+
+  @Override
+  public int traceJavaMethod(String className, String methodName, int numArgs, String args,
+                             int events, int timeoutMs, int maxEvents) {
+    return JavaMethodTrace.install(className, methodName, numArgs, args, events, timeoutMs, maxEvents);
+  }
+
+  @Override
+  public boolean untraceJavaMethod(String className, String methodName, int numArgs, String args) {
+    return JavaMethodTrace.untrace(className, methodName, numArgs, args);
+  }
+
+  @Override
+  public String javaMethodTraceStatus() {
+    return JavaMethodTrace.status();
+  }
+
+  @Override
+  public boolean addNotTracePackage(String pkg) {
+    return OceanTracker.addWhitePackage(pkg);
+  }
 
 
   @Override
@@ -130,21 +341,54 @@ public class AppInjectAgent extends InjectAgentBase implements AppApi {
   }
 
   @Override
-  public void initNativeLog() {
+  public boolean traceNativeFunction(String libName, String symbol, long address,
+                                     int timeoutMs, int maxEvents, int flags, String logPath) {
+    String path = logPath;
+    if (path == null) {
+      // 默认落盘到应用 files/native 下, 时间戳命名防覆盖
+      path = new File(nativeLogDir(),
+          "native_trace_" + new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date())
+              + ".log").getAbsolutePath();
+    }
+    return AlbNative.stalkerTraceFunction(libName, symbol, address, timeoutMs, maxEvents, flags, path);
+  }
+
+  @Override
+  public boolean stopNativeTrace() {
+    return AlbNative.stalkerTraceStop();
+  }
+
+  @Override
+  public String nativeTraceStatus() {
+    return AlbNative.stalkerTraceStatus();
+  }
+
+  @Override
+  public String nativeTraceDump(int maxBytes) {
+    return AlbNative.stalkerTraceDump(maxBytes);
+  }
+
+  /** native 日志/trace 落盘目录: 应用 files/native(无 Application 时按包名兜底) */
+  private static File nativeLogDir() {
     Application application = Albatross.currentApplication();
-    File logDIr;
+    File logDir;
     if (application == null) {
       String packageName = AppMetaInfo.packageName;
-      logDIr = new File("/data/data/" + packageName + "/files/native");
+      logDir = new File("/data/data/" + packageName + "/files/native");
     } else {
-      logDIr = new File(application.getFilesDir(), "native");
+      logDir = new File(application.getFilesDir(), "native");
     }
-    if (!logDIr.exists()) {
-      logDIr.mkdirs();
+    if (!logDir.exists()) {
+      logDir.mkdirs();
     }
+    return logDir;
+  }
+
+  @Override
+  public void initNativeLog() {
     final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault());
     String today = DATE_FORMAT.format(new Date());
-    AlbNative.hookInit(logDIr.getAbsolutePath() + "/" + today + ".txt");
+    AlbNative.hookInit(new File(nativeLogDir(), today + ".txt").getAbsolutePath());
   }
 
   static SearchCallback loadCallback;
@@ -153,10 +397,10 @@ public class AppInjectAgent extends InjectAgentBase implements AppApi {
   public void watchLibraryLoad(boolean on) {
     if (on) {
       if (loadCallback == null) {
-        loadCallback = (symbol, addr, size, idx) -> {
+        loadCallback = (libName, handler_ptr, flags, idx) -> {
           if (loadCallback == null)
             return false;
-          onLibLoad(symbol, ThreadConfig.myId());
+          onLibLoad(libName, ThreadConfig.myId());
           return true;
         };
         AlbNative.registerLibraryCallback(loadCallback, null);
@@ -305,6 +549,7 @@ public class AppInjectAgent extends InjectAgentBase implements AppApi {
     if (unixRpcServer == null) {
       Albatross.log("create server fail");
       PluginMessage.registerPluginMethod();
+      OceanLogger.registerLogger();
     } else {
       if ((albatrossInitFlags & FLAG_LOG) != 0) {
         try {
@@ -312,8 +557,14 @@ public class AppInjectAgent extends InjectAgentBase implements AppApi {
         } catch (Exception e) {
           throw new RuntimeException(e);
         }
+        try {
+          OceanLogger.registerLogger(PluginMessage.class.getDeclaredMethod("log", String.class));
+        } catch (NoSuchMethodException e) {
+          Albatross.log("registerLogger fail", e);
+        }
       } else {
         PluginMessage.registerPluginMethod();
+        OceanLogger.registerLogger();
       }
     }
     if (application != null) {

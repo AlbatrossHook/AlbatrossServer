@@ -39,10 +39,12 @@ dependencies {
         compileOnly(project(":annotation"))
         compileOnly(project(":core"))
         compileOnly(project(":server"))
+        compileOnly(project(":ocean"))
     } else {
         compileOnly("qing.albatross:annotation-release:1.0@aar")
         compileOnly("qing.albatross:core-release:1.0@aar")
         compileOnly("qing.albatross:server-release:1.0@aar")
+        compileOnly("qing.albatross:ocean-release:1.0@aar")
         logger.lifecycle("[$name] Using Albatross libraries as AAR files.")
     }
     compileOnly(project(":agent_lib_common"))

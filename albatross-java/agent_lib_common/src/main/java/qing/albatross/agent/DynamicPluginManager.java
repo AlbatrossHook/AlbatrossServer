@@ -24,7 +24,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.zip.ZipFile;
 
 import dalvik.system.DexClassLoader;
 import qing.albatross.core.Albatross;
@@ -60,25 +59,6 @@ public class DynamicPluginManager {
 
   private String generatePluginKey(String dexPath, String className) {
     return dexPath + className;
-  }
-
-  /**
-   * The native in-memory loader accepts one raw dex file, while DexClassLoader
-   * understands APK/JAR containers (including multidex APKs).
-   */
-  private boolean isDexArchive(String path) {
-    if (path == null) {
-      return false;
-    }
-    if (path.regionMatches(true, path.length() - 4, ".apk", 0, 4)
-        || path.regionMatches(true, path.length() - 4, ".zip", 0, 4)) {
-      return true;
-    }
-    try (ZipFile zipFile = new ZipFile(path)) {
-      return zipFile.getEntry("classes.dex") != null;
-    } catch (Exception ignored) {
-      return false;
-    }
   }
 
 
@@ -177,12 +157,17 @@ public class DynamicPluginManager {
       libName = nativeLibPath.substring(i + 4, nativeLibPath.length() - 3);
     }
     if (dexClassLoader == null) {
+      // 反检测模式下 /data 下的插件都从内存定义类：native 侧自动识别裸 dex 与
+      // APK/JAR（多 dex 会解出全部 classes*.dex），失败（归档不支持、需要解压但
+      // 取不到 libz 等）返回 null，再回退文件加载保证功能可用。
       boolean useMemoryDexLoader = Albatross.containsFlags(Albatross.FLAG_ANTI_DETECTION)
-          && pluginDexPath.startsWith("/data/")
-          && !isDexArchive(pluginDexPath);
+          && pluginDexPath.startsWith("/data/");
       if (useMemoryDexLoader) {
         dexClassLoader = Albatross.loadMemoryDexClassLoader(pluginDexPath, libDir, DynamicPluginManager.class.getClassLoader(), null);
-      } else
+        if (dexClassLoader == null)
+          Albatross.log("load plugin in memory failed, fallback to DexClassLoader: " + pluginDexPath);
+      }
+      if (dexClassLoader == null)
         dexClassLoader = new DexClassLoader(pluginDexPath, null, libDir, DynamicPluginManager.class.getClassLoader());
       classLoaderCache.put(pluginDexPath, dexClassLoader);
     }

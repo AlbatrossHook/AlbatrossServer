@@ -89,6 +89,12 @@ public class AlbatrossClient extends UnixRpcClientInstance implements AlbatrossS
   native public boolean patchSelinux();
 
   @Override
+  native public boolean supportExtendKpm();
+
+  @Override
+  native public boolean setInjectFlags(int flags, String tempPath);
+
+  @Override
   native public boolean isInjected();
 
   @Override

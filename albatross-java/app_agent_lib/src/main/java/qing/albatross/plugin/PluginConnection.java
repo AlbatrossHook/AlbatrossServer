@@ -39,9 +39,34 @@ public class PluginConnection {
   static String appApgAgentDex;
   static String systemAppAgentDex;
   static int albatrossInitFlags = 0;
+  static int injectFlags = Const.INJECT_DEFAULT;
 
   private PluginConnection(AlbatrossClient client) {
     this.client = client;
+  }
+
+  /**
+   * 设置注入目标进程时使用的 albatross init flags（如 FLAG_DISABLE_JIT、FLAG_ANTI_DETECTION）。
+   * 只影响之后创建的连接与之后发起的注入。
+   */
+  public static void setInitFlags(int flags) {
+    albatrossInitFlags = flags;
+  }
+
+  public static int getInitFlags() {
+    return albatrossInitFlags;
+  }
+
+  /**
+   * 设置注入方式flag（INJECT_KEEP/INJECT_UNIX/INJECT_MEMFD），同时下发给服务端作为后续
+   * launch(规则)注入的默认值。只影响之后发起的注入。
+   */
+  public static void setInjectFlags(int flags) {
+    injectFlags = flags;
+  }
+
+  public static int getInjectFlags() {
+    return injectFlags;
   }
 
   public static PluginConnection create(String serverPath, String secondLibrary, String agentDex, String systemAgent) {
@@ -54,10 +79,16 @@ public class PluginConnection {
         client1.set_2ndArchLib(secondLibrary);
       }
       client1.patchSelinux();
+      try {
+        //旧服务端可能没有该 handler，注册失败时该 native 方法不可调用，不能影响连接建立
+        client1.setInjectFlags(injectFlags, null);
+      } catch (Throwable e) {
+        Albatross.log("set inject flags fail:" + e);
+      }
       appApgAgentDex = agentDex;
       systemAppAgentDex = systemAgent;
-      client1.setAppAgent(agentDex, null, Albatross.class.getName(), AppInjectAgent.class.getName(), "albatross_load_init", Albatross.FLAG_INJECT | Albatross.FLAG_INIT_RPC);
-      client1.setSystemServerAgent(systemAgent, SYSTEM_SERVER_ENTRY, "system_server", 0, null, 3);
+      client1.setAppAgent(agentDex, null, Albatross.class.getName(), AppInjectAgent.class.getName(), "albatross_load_init", Albatross.FLAG_INJECT | Albatross.FLAG_INIT_RPC | albatrossInitFlags);
+      client1.setSystemServerAgent(systemAgent, SYSTEM_SERVER_ENTRY, "system_server", albatrossInitFlags, null, 3);
       int client1Tid = client1.getTid();
       if (client1Tid > 0)
         return instance;
@@ -70,7 +101,12 @@ public class PluginConnection {
   public int doInject(String pkg, String pluginDex, String pluginClass, String param1, int param2) {
     int pid = client.getProcessPid(pkg);
     if (pid > 0) {
-      int ret = client.injectAlbatross(pid, 0x10 | 0x20, null);
+      String tempDir = null;
+      if ((injectFlags & Const.INJECT_MEMFD) != 0) {
+        //memfd 注入需要临时目录名，由服务端在目标进程内创建
+        tempDir = appApgAgentDex != null ? appApgAgentDex.substring(0, appApgAgentDex.lastIndexOf('/') + 1) : null;
+      }
+      int ret = client.injectAlbatross(pid, injectFlags, tempDir);
       if (ret < 0)
         return -1;
       return client.loadPlugin(pid, appApgAgentDex, null, Albatross.class.getName(),
@@ -78,6 +114,38 @@ public class PluginConnection {
           pluginDex, null, pluginClass, param1, param2);
     }
     return -2;
+  }
+
+  /**
+   * 在已建立的连接上重新下发 agent/flags，不重连（运行选项变化时用；
+   * 服务端只在路径变化时才重新注入 system_server）。
+   */
+  public void pushFlags() {
+    client.setAppAgent(appApgAgentDex, null, Albatross.class.getName(), AppInjectAgent.class.getName(),
+        "albatross_load_init", Albatross.FLAG_INJECT | Albatross.FLAG_INIT_RPC | albatrossInitFlags);
+    client.setSystemServerAgent(systemAppAgentDex, SYSTEM_SERVER_ENTRY, "system_server", albatrossInitFlags,
+        null, 3);
+    try {
+      client.setInjectFlags(injectFlags, null);
+    } catch (Throwable e) {
+      Albatross.log("set inject flags fail:" + e);
+    }
+  }
+
+  /**
+   * 内核模块隐藏（rwbp）：隐藏 agent dex/lib 等路径并对 libart/libc 做 smaps 归零。
+   * 需要设备已加载 rwbp.ko，开启后不可撤销，返回是否可用。
+   */
+  public boolean supportExtendKpm() {
+    return client.supportExtendKpm();
+  }
+
+  /**
+   * 下发注入方式flag到服务端（作为后续 launch 注入的默认值），返回服务端是否接受
+   */
+  public boolean pushInjectFlags(int flags, String tempPath) {
+    injectFlags = flags;
+    return client.setInjectFlags(flags, tempPath);
   }
 
 
