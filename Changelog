@@ -1,3 +1,14 @@
+version 4.0.0
+- Add structured hook-hit recording: an in-process ring buffer (HookEventBuffer) with hook_events_enable / status / pull / clear, covering instruction hooks and dynamic hooks (method, args, this, return value, tid).
+- Add per-method Java tracing: trace_java_method arms OceanTracker on entry and disarms on exit, with untrace_java_method and java_method_trace_status; add trace window timeout / max-event controls and trace_status.
+- Add built-in native tracing: trace_native_function / stop_native_trace / native_trace_status / native_trace_dump, recording call / ret / exec / block events, register context, memory read/write bytes, system-library filtering and delayed registration.
+- Expose signature-free dynamic hooks: dyn_hook_method / dyn_hook_method_return / dyn_unhook_method / dyn_hook_class / dyn_unhook_class.
+- RPC: add asynchronous calls (MSG_ASYNC_CALL) with server-side timeout and overload replies, arm-script recording / replay, typed broadcast auto-discovery (MSG_APIS v2) and argument signature validation.
+- CModule: add compile / call / call_v, isolated execution, layout / list / source / symbols / capabilities, annotate / audit / cancel / deadline / timeout and address symbolization.
+- Python: add AttachFailed and raise_on_fail reporting for attach / launch flows, a deploy-downgrade guard, checked file push / pull helpers, JVM loading options, and rwbp watch event parsing (v1 / v2).
+- Plugins: memory-dex loading now supports APK / JAR and multidex with DexClassLoader fallback; add inject-flag / KPM plumbing (setInjectFlags / supportExtendKpm) and the ocean tracing AAR dependency.
+- Tests: load plugin_demo.apk.
+
 version 3.6.1
 - Fix injection to pass the device temp path instead of None.
 - Add shared test helpers (check_client / hide_albatross) and bootstrap the python path in the test scripts so both albatross and the test package import correctly.

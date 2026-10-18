@@ -1,27 +1,43 @@
+# AlbatrossServer client configuration. All keys are optional; the values shown
+# in comments are the defaults used by albatross-python when a key is absent.
+
+# Name of the injected library on the device. "random" generates a per-device name.
 lib_name = "libalbatross_base.so"
+
+# adb executable. Omit to use PATH / ANDROID_SDK_ROOT / ANDROID_HOME.
 #adb_path=
+
+# Directory containing <abi>/{albatross_server,libalbatross_base.so}.
+# Default: <resource_dir>/jniLibs/
 #jni_libs=
 
-#albatross-java/app_agent/build/outputs/apk/release/xxxxx.apk
+# Directory containing app_agent.dex and system_server.dex.
+# Default: <resource_dir>/agent/
 #agent_dir=
 
-#albatross-java/app_agent/build/outputs/apk/release/xxxx.apk
+# Explicit agent dex paths. Defaults: <agent_dir>/system_server.dex and <agent_dir>/app_agent.dex.
 #system_server_agent_file=
-
 #app_agent_file=
+
+# Java class/entry points used to load the agents (usually leave unset).
 #albatross_class_name=
-#clear_history_launch=
 #albatross_agent_class=
-#albatross_register_func
+#albatross_register_func=
+#system_server_init_class=
+
+# Device-side destinations and injection settings.
 #system_server_agent_dst=
-#app_agent_dst
-#app_injector_dir
-#support_abi_list
-#abi_lib_names=
 #server_dst_path=
 #lib_path=
 #server_port=
 #system_server_address=
-#system_server_init_class=
-#这里配置你下载的resource解压目录
-#resource_dir="xxxx/resource_v2.0.0_20250916/resource/"
+
+# Launch behavior.
+#clear_history_launch=
+
+# Supported ABI directories under jniLibs/, in priority order.
+#support_abi_list=["arm64-v8a","armeabi-v7a","x86_64","x86"]
+
+# Root directory of the downloaded release resource package.
+# Keep the trailing slash: paths are concatenated directly.
+#resource_dir="/path/to/resource/"

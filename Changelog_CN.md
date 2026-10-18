@@ -1,3 +1,14 @@
+version 4.0.0
+- 新增结构化的 hook 命中记录：进程内环形缓冲（HookEventBuffer）与 hook_events_enable / status / pull / clear，覆盖指令级 hook 与动态 hook（方法、参数、this、返回值、tid）。
+- 新增按方法的 Java trace：trace_java_method 在进入方法时 arm OceanTracker、退出即 disarm，配套 untrace_java_method 与 java_method_trace_status；新增 trace 窗口超时、事件数上限与 trace_status。
+- 新增内置 native trace：trace_native_function / stop_native_trace / native_trace_status / native_trace_dump，记录 call / ret / exec / block 事件、寄存器现场、访存读写字节，支持系统库过滤与延迟登记。
+- 暴露免签名动态 hook：dyn_hook_method / dyn_hook_method_return / dyn_unhook_method / dyn_hook_class / dyn_unhook_class。
+- RPC：新增异步调用（MSG_ASYNC_CALL，服务端超时与过载代答）、武装脚本记录/重放、typed 广播自动发现（MSG_APIS v2）与参数签名校验。
+- CModule：新增 compile / call / call_v、隔离执行、layout / list / source / symbols / capabilities、annotate / audit / cancel / deadline / timeout 与地址符号化。
+- Python：attach / launch 系列新增 AttachFailed 与 raise_on_fail 失败汇总、部署降级守卫、带校验的文件推送/拉取、JVM 加载参数，以及 rwbp 命中事件解析（v1 / v2）。
+- 插件：内存 dex 加载支持 APK / JAR 与多 dex（失败回退 DexClassLoader）；新增注入 flag / KPM 链路（setInjectFlags / supportExtendKpm）与 ocean trace AAR 依赖。
+- 测试改用 plugin_demo.apk。
+
 version 3.6.1
 - 修复注入时未传入设备临时路径（temp_path）的问题。
 - 测试新增共享 helper（check_client / hide_albatross），并为测试脚本添加 python path 引导，确保 albatross 与 test 包能正确 import。
