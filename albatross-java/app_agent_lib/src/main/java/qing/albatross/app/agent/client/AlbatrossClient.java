@@ -37,7 +37,7 @@ public class AlbatrossClient extends UnixRpcClientInstance implements AlbatrossS
   native public boolean setArchLib(String libPath);
 
   @Override
-  native public byte loadPlugin(int pid, String appAgentDex, String agentLib, String albatrossClass, String agentClass, String agentRegisterFunc, int dexFlag, String pluginDex, String pluginLib, String pluginClass, String argString, int argInt);
+  native public byte loadPlugin(int pid, String appAgentDex, String agentLib, String albatrossClass, String agentClass, String agentRegisterFunc, int dexFlag, String extraInfo, String pluginDex, String pluginLib, String pluginClass, String argString, int argInt);
 
   @Override
   native public byte loadDex(int pid, String dexPath, String libPath, String registerClass, String className, String loaderFunc, int loadDexFlag, String param1, int param2);

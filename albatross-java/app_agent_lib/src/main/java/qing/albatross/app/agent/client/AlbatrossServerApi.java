@@ -32,8 +32,8 @@ public interface AlbatrossServerApi {
 
 
   byte loadPlugin(int pid, String appAgentDex, String agentLib, String albatrossClass, String agentClass,
-                  String agentRegisterFunc, int albatrossInitFlags, String pluginDex, String pluginLib, String pluginClass,
-                  String argString, int argInt);
+                  String agentRegisterFunc, int albatrossInitFlags, String extraInfo, String pluginDex, String pluginLib,
+                  String pluginClass, String argString, int argInt);
 
   byte loadDex(int pid, String dexPath, String libPath, String registerClass, String className, String loaderFunc, int albatrossInitFlags, String param1, int param2);
 

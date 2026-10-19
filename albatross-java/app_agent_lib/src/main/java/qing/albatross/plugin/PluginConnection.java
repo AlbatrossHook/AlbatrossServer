@@ -111,7 +111,7 @@ public class PluginConnection {
         return -1;
       return client.loadPlugin(pid, appApgAgentDex, null, Albatross.class.getName(),
           AppInjectAgent.class.getName(), "albatross_load_init", albatrossInitFlags,
-          pluginDex, null, pluginClass, param1, param2);
+          null, pluginDex, null, pluginClass, param1, param2);
     }
     return -2;
   }
